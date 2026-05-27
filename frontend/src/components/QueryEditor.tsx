@@ -1,22 +1,48 @@
 /**
  * QueryEditor — the right-rail form for composing a single Overpass query.
  *
- * Owns the textarea, snippet/tag-library trigger buttons, run/results/add-as-layer
- * actions, and the first-call-per-session confirmation modal. Pure with respect
- * to drafts: parent passes a draft + onChange + onRun + onAddAsLayer.
+ * Two editing surfaces share one draft:
+ *
+ *   ┌────────────────┐    ┌────────────────────┐
+ *   │ Visual builder │◄──►│  Raw Overpass QL   │
+ *   └────────────────┘    └────────────────────┘
+ *           ▲                       ▲
+ *           └───── draft.query ─────┘
+ *                  (the wire format)
+ *
+ * Visual mode is the default — investigators pick "subjects" (Prisons &
+ * detention, Hospitals & clinics, …) and the QL is emitted from the
+ * resolved expansion. Raw mode is the power-user escape hatch: the legacy
+ * textarea + snippets + Tag Library, kept available for advanced cases
+ * and as the insertion target for the Tag Library drawer (which writes
+ * into the textarea via DOM-level focus tracking).
+ *
+ * Pure with respect to drafts: parent passes a draft + onChange + onRun +
+ * onAddAsLayer. Parent (ComposeStep) also fetches and shares the curated
+ * glossary so multiple editors can read from the same response.
  */
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { FieldShell, TextInput } from "@/components/ui/Field";
 import { BboxPicker, type Bbox } from "@/components/BboxPicker";
 import { SnippetMenu } from "@/components/SnippetMenu";
+import { QueryBuilder } from "@/components/QueryBuilder";
 import type { Snippet } from "@/lib/querySnippets";
 import type { OverpassQueryPreflightResponse } from "@/lib/types";
+import type { GlossaryEntry } from "@/lib/tagLibrary.types";
+import {
+  buildQuery,
+  matchSubjects,
+  toQL,
+  tryParse,
+} from "@/lib/queryBuilder";
 
 export interface QueryDraftRunResult {
   totalCount: number;
   topTags: { key: string; value: string; count: number }[];
 }
+
+export type EditorMode = "builder" | "raw";
 
 export interface QueryDraft {
   id: string;
@@ -30,6 +56,12 @@ export interface QueryDraft {
   bbox: Bbox | null;
   regionLabel: string | null;
   lastRunResult: QueryDraftRunResult | null;
+  /** Builder-mode source of truth. In ``"builder"`` mode the draft's
+   *  ``query`` is derived from this on every change; in ``"raw"`` mode the
+   *  array is preserved but no longer drives emission. */
+  selectedSubjectIds: string[];
+  /** Which editing surface is active. New drafts start in ``"builder"``. */
+  editorMode: EditorMode;
 }
 
 export interface QueryEditorProps {
@@ -39,7 +71,8 @@ export interface QueryEditorProps {
   onAddAsLayer: () => Promise<void>;
   running: boolean;
   adding?: boolean;
-  /** Seam for B3 — clicking "Tag Library" opens the drawer; we just signal up. */
+  /** Opens the Tag Library drawer. The Builder uses this for the
+   *  "Search all OpenStreetMap tags" fallback in its subject picker. */
   onOpenTagLibrary?: () => void;
   /** Module-level flag the parent owns: has the user already confirmed Overpass calls this session? */
   overpassConfirmed: boolean;
@@ -52,6 +85,10 @@ export interface QueryEditorProps {
     query: string,
     bbox: Bbox | null,
   ) => Promise<OverpassQueryPreflightResponse>;
+  /** Curated glossary, fetched once by the parent. */
+  glossaryEntries: GlossaryEntry[];
+  glossaryLoading: boolean;
+  glossaryError: string | null;
 }
 
 export function QueryEditor({
@@ -65,10 +102,16 @@ export function QueryEditor({
   overpassConfirmed,
   onConfirmOverpass,
   onPreflight,
+  glossaryEntries,
+  glossaryLoading,
+  glossaryError,
 }: QueryEditorProps) {
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const [snippetsOpen, setSnippetsOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [modeSwitchBanner, setModeSwitchBanner] = useState<
+    null | { kind: "unparseable" }
+  >(null);
   // Preflight state is editor-local — it doesn't outlive the draft and
   // doesn't need to round-trip through the parent. Cleared whenever the
   // user edits the query (the previous estimate is no longer accurate).
@@ -160,9 +203,91 @@ export function QueryEditor({
     onChange(next);
   }
 
+  // ── Builder ↔ draft glue ────────────────────────────────────────────────
+  // The Builder is pure: it never reads or writes draft.query directly. We
+  // recompute the QL string from selectedSubjectIds on every change and
+  // update both fields atomically.
+  function handleSubjectsChange(next: string[]) {
+    const q = toQL(
+      buildQuery({ subjectIds: next, glossary: glossaryEntries }),
+    );
+    handleDraftChange({
+      ...draft,
+      selectedSubjectIds: next,
+      query: q,
+    });
+  }
+
+  // ── Mode switching ──────────────────────────────────────────────────────
+  function switchToRaw() {
+    // Builder → Raw: serialise current subjects to QL once, then hand
+    // ownership of the string to the textarea. selectedSubjectIds is kept
+    // so that switching back can attempt round-trip.
+    const q =
+      draft.query.trim().length > 0
+        ? draft.query
+        : toQL(buildQuery({ subjectIds: draft.selectedSubjectIds, glossary: glossaryEntries }));
+    setModeSwitchBanner(null);
+    handleDraftChange({ ...draft, editorMode: "raw", query: q });
+  }
+
+  function switchToBuilder() {
+    // Raw → Builder: try to recover subjects from the typed QL. If the
+    // query is empty, just go to Builder with the existing selection. If
+    // the parser can't read the QL, show a banner asking the user how to
+    // proceed — don't silently clobber hand-tweaked QL.
+    const trimmed = draft.query.trim();
+    if (!trimmed) {
+      setModeSwitchBanner(null);
+      handleDraftChange({ ...draft, editorMode: "builder" });
+      return;
+    }
+    const parsed = tryParse(draft.query);
+    if (parsed === null) {
+      setModeSwitchBanner({ kind: "unparseable" });
+      return;
+    }
+    const { subjectIds } = matchSubjects(parsed.blocks, glossaryEntries);
+    setModeSwitchBanner(null);
+    // If matchSubjects found nothing but there are blocks, the QL has
+    // custom tag content the Builder can't represent yet. Surface that
+    // by keeping the user in Raw mode and showing the banner.
+    if (subjectIds.length === 0 && parsed.blocks.length > 0) {
+      setModeSwitchBanner({ kind: "unparseable" });
+      return;
+    }
+    handleDraftChange({
+      ...draft,
+      editorMode: "builder",
+      selectedSubjectIds: subjectIds,
+    });
+  }
+
+  function startOverInBuilder() {
+    setModeSwitchBanner(null);
+    handleDraftChange({
+      ...draft,
+      editorMode: "builder",
+      selectedSubjectIds: [],
+      query: toQL(buildQuery({ subjectIds: [], glossary: glossaryEntries })),
+    });
+  }
+
+  // The Builder's SubjectPicker has a "Browse all OpenStreetMap tags
+  // (advanced)" fallback. Clicking it flips the editor into raw mode so
+  // the Tag Library drawer's insertion path (which writes into the
+  // textarea) has somewhere to land, then opens the drawer.
+  function handleOpenTagLibraryFromBuilder() {
+    switchToRaw();
+    onOpenTagLibrary?.();
+  }
+
   return (
     <div className="space-y-4">
-      <Eyebrow>Query</Eyebrow>
+      <ModeToggle
+        mode={draft.editorMode}
+        onSwitch={(m) => (m === "builder" ? switchToBuilder() : switchToRaw())}
+      />
 
       <FieldShell label="Layer name">
         <TextInput
@@ -182,66 +307,105 @@ export function QueryEditor({
         />
       </FieldShell>
 
-      <div>
-        <div className="mb-1.5 flex items-center justify-between">
-          <span
+      {/* Mode-switch banner — appears when raw → builder can't round-trip. */}
+      {modeSwitchBanner?.kind === "unparseable" && (
+        <div
+          role="alert"
+          className="rounded-md border border-[var(--color-line-strong)] bg-[var(--color-surface-sunken)] p-3"
+        >
+          <p
             className="uppercase text-[var(--color-ink-faint)]"
-            style={{ fontSize: "10px", letterSpacing: "0.18em", fontWeight: 600 }}
+            style={{ fontSize: "10px", letterSpacing: "0.22em", fontWeight: 600 }}
           >
-            Overpass QL
-          </span>
-          <div className="relative flex items-center gap-1.5">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => setSnippetsOpen((v) => !v)}
-              aria-expanded={snippetsOpen}
-              aria-haspopup="menu"
-            >
-              Snippets {snippetsOpen ? "▴" : "▾"}
+            Can't switch back
+          </p>
+          <p className="mt-1 text-sm text-[var(--color-ink)]">
+            The raw query uses things the visual builder can't show yet
+            (custom tags, joins, or area filters). You can stay in raw mode,
+            or start fresh in the builder.
+          </p>
+          <div className="mt-2 flex gap-2">
+            <Button variant="primary" size="sm" onClick={startOverInBuilder}>
+              Start fresh in builder
             </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => onOpenTagLibrary?.()}
-              disabled={!onOpenTagLibrary}
-              title={onOpenTagLibrary ? "Open the Tag Library" : "Tag Library coming soon"}
-            >
-              Tag Library
+            <Button variant="ghost" size="sm" onClick={() => setModeSwitchBanner(null)}>
+              Keep editing raw
             </Button>
-            {snippetsOpen && (
-              <div className="relative">
-                <SnippetMenu
-                  onInsert={handleSnippet}
-                  onClose={() => setSnippetsOpen(false)}
-                />
-              </div>
-            )}
           </div>
         </div>
-        <textarea
-          ref={taRef}
-          value={draft.query}
-          onChange={(e) => handleDraftChange({ ...draft, query: e.target.value })}
-          spellCheck={false}
-          rows={14}
-          placeholder="[out:json][timeout:25];&#10;nwr[&quot;amenity&quot;=&quot;prison&quot;]({{bbox}});&#10;out body geom;"
-          className="block w-full rounded-md border border-[var(--color-line)] bg-[var(--color-surface-raised)] px-2.5 py-2 font-[var(--font-mono)] text-[12px] leading-relaxed text-[var(--color-ink)] focus:border-[var(--color-accent)] focus:outline-none"
-          style={{ tabSize: 2 }}
-          // Marks this textarea as a valid Tag Library insertion target.
-          // ProjectWorkspace's drawer uses this to find the most recently
-          // touched QL editor instead of relying on `document.activeElement`,
-          // which is null in Safari/Firefox by the time the drawer button
-          // click fires. See D2 review #2 / D3 review #1b.
-          data-tag-insert-target="true"
+      )}
+
+      {draft.editorMode === "builder" ? (
+        <QueryBuilder
+          selectedSubjectIds={draft.selectedSubjectIds}
+          onChange={handleSubjectsChange}
+          glossaryEntries={glossaryEntries}
+          glossaryLoading={glossaryLoading}
+          glossaryError={glossaryError}
+          onOpenTagLibrary={onOpenTagLibrary ? handleOpenTagLibraryFromBuilder : undefined}
         />
-        <p className="mt-1 text-[10px] text-[var(--color-ink-faint)]">
-          Use <code className="font-[var(--font-mono)]">{"{{bbox}}"}</code> as a
-          placeholder — the selected region gets substituted at run time.
-        </p>
-      </div>
+      ) : (
+        <div>
+          <div className="mb-1.5 flex items-center justify-between">
+            <span
+              className="uppercase text-[var(--color-ink-faint)]"
+              style={{ fontSize: "10px", letterSpacing: "0.18em", fontWeight: 600 }}
+            >
+              Overpass QL
+            </span>
+            <div className="relative flex items-center gap-1.5">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setSnippetsOpen((v) => !v)}
+                aria-expanded={snippetsOpen}
+                aria-haspopup="menu"
+              >
+                Snippets {snippetsOpen ? "▴" : "▾"}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => onOpenTagLibrary?.()}
+                disabled={!onOpenTagLibrary}
+                title={onOpenTagLibrary ? "Open the Tag Library" : "Tag Library coming soon"}
+              >
+                Tag Library
+              </Button>
+              {snippetsOpen && (
+                <div className="relative">
+                  <SnippetMenu
+                    onInsert={handleSnippet}
+                    onClose={() => setSnippetsOpen(false)}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+          <textarea
+            ref={taRef}
+            value={draft.query}
+            onChange={(e) => handleDraftChange({ ...draft, query: e.target.value })}
+            spellCheck={false}
+            rows={14}
+            placeholder="[out:json][timeout:25];&#10;nwr[&quot;amenity&quot;=&quot;prison&quot;]({{bbox}});&#10;out body geom;"
+            className="block w-full rounded-md border border-[var(--color-line)] bg-[var(--color-surface-raised)] px-2.5 py-2 font-[var(--font-mono)] text-[12px] leading-relaxed text-[var(--color-ink)] focus:border-[var(--color-accent)] focus:outline-none"
+            style={{ tabSize: 2 }}
+            // Marks this textarea as a valid Tag Library insertion target.
+            // ProjectWorkspace's drawer uses this to find the most recently
+            // touched QL editor instead of relying on `document.activeElement`,
+            // which is null in Safari/Firefox by the time the drawer button
+            // click fires. See D2 review #2 / D3 review #1b.
+            data-tag-insert-target="true"
+          />
+          <p className="mt-1 text-[10px] text-[var(--color-ink-faint)]">
+            Use <code className="font-[var(--font-mono)]">{"{{bbox}}"}</code> as a
+            placeholder — the selected region gets substituted at run time.
+          </p>
+        </div>
+      )}
 
       <div className="flex items-center gap-2">
         <Button
@@ -318,6 +482,49 @@ export function QueryEditor({
   );
 }
 
+/** Small segmented control for switching between Visual builder and Raw QL. */
+function ModeToggle({
+  mode,
+  onSwitch,
+}: {
+  mode: EditorMode;
+  onSwitch: (m: EditorMode) => void;
+}) {
+  const tabs: { id: EditorMode; label: string; hint: string }[] = [
+    { id: "builder", label: "Visual", hint: "Pick subjects — no syntax needed" },
+    { id: "raw", label: "Raw query", hint: "Hand-edit Overpass QL" },
+  ];
+  return (
+    <div
+      role="tablist"
+      aria-label="Query editing mode"
+      className="inline-flex rounded-md border border-[var(--color-line)] bg-[var(--color-surface-sunken)] p-0.5"
+    >
+      {tabs.map((t) => {
+        const active = t.id === mode;
+        return (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={active}
+            type="button"
+            onClick={() => onSwitch(t.id)}
+            title={t.hint}
+            className={[
+              "rounded px-3 py-1 text-[11px] font-medium",
+              active
+                ? "bg-[var(--color-surface-raised)] text-[var(--color-ink)] shadow-[0_1px_2px_rgba(0,0,0,0.04)]"
+                : "text-[var(--color-ink-faint)] hover:text-[var(--color-ink-soft)]",
+            ].join(" ")}
+          >
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 /** EstimateCard — under-cap and over-cap variants of the same readout.
  * For under-cap: shows the projected count and KML byte size in a
  * neutral surface-sunken card. For over-cap: same numbers but framed as
@@ -377,17 +584,6 @@ function EstimateCard({ result }: { result: OverpassQueryPreflightResponse }) {
         Within the {result.hard_cap.toLocaleString()}-feature cap.
       </p>
     </div>
-  );
-}
-
-function Eyebrow({ children }: { children: React.ReactNode }) {
-  return (
-    <p
-      className="uppercase text-[var(--color-ink-faint)]"
-      style={{ fontSize: "10px", letterSpacing: "0.22em", fontWeight: 600 }}
-    >
-      {children}
-    </p>
   );
 }
 

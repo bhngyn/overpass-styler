@@ -269,8 +269,7 @@ function BboxReadout({
   if (!bbox) {
     return (
       <p className="text-[11px] italic text-[var(--color-ink-faint)]">
-        No region selected — the query will run unbounded if it contains{" "}
-        <code className="font-[var(--font-mono)]">{"{{bbox}}"}</code>.
+        No region selected — pick a place above to narrow the search.
       </p>
     );
   }

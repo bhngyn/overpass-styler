@@ -5,21 +5,34 @@
  * rail (query editor when a draft is selected). The map is mounted as a
  * sibling by ProjectWorkspace, so we never re-init MapLibre between steps.
  *
+ * Drop-in behaviour: entering Compose with no drafts auto-creates one, so
+ * the investigator lands directly on the Builder surface — no "+ New
+ * layer" empty-state click required.
+ *
  * Query drafts live in component state, not Zustand — drafts shouldn't leak
  * across project switches.
  */
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { QueryEditor, type QueryDraft } from "@/components/QueryEditor";
 import { useProjectStore } from "@/stores/project";
 import { api } from "@/lib/api";
+import type { GlossaryEntry } from "@/lib/tagLibrary.types";
 
 // Module-level session flag — once the investigator confirms the first
 // Overpass call, we don't ask again until the page reloads.
 let overpassConfirmedThisSession = false;
 
+// Module-level glossary cache — the curated catalog doesn't change between
+// projects or step visits, so we fetch it once per page-load and share the
+// payload across every ComposeStep mount.
+let glossaryCache: GlossaryEntry[] | null = null;
+let glossaryFetchPromise: Promise<GlossaryEntry[]> | null = null;
+
 interface Props {
-  /** Seam for B3 — wired by the integrator (B5) once TagLibraryDrawer lands. */
+  /** Plumbs the existing Tag Library drawer down to QueryEditor. The
+   *  Builder uses it as the "search all OpenStreetMap tags" fallback in
+   *  its subject picker; raw-mode uses it as the legacy tag-insert path. */
   onOpenTagLibrary?: () => void;
 }
 
@@ -34,6 +47,8 @@ function newDraft(): QueryDraft {
     bbox: null,
     regionLabel: null,
     lastRunResult: null,
+    selectedSubjectIds: [],
+    editorMode: "builder",
   };
 }
 
@@ -53,7 +68,50 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
   const [overpassConfirmed, setOverpassConfirmed] =
     useState<boolean>(overpassConfirmedThisSession);
 
+  // Curated glossary — shared by every draft's QueryBuilder. Fetched once
+  // per page load, cached in a module-level variable so navigating back
+  // into Compose doesn't refetch.
+  const [glossary, setGlossary] = useState<GlossaryEntry[]>(glossaryCache ?? []);
+  const [glossaryLoading, setGlossaryLoading] = useState<boolean>(
+    glossaryCache === null,
+  );
+  const [glossaryError, setGlossaryError] = useState<string | null>(null);
+
   const fileInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (glossaryCache) return; // already populated
+    let cancelled = false;
+    if (!glossaryFetchPromise) {
+      glossaryFetchPromise = api.tagLibrary
+        .curated()
+        .then((r) => {
+          glossaryCache = r.entries;
+          return r.entries;
+        })
+        .catch((e) => {
+          // Rethrow so awaiting effects (and any future second mount) see
+          // the failure; also clear so a refresh can retry from a future
+          // mount.
+          glossaryFetchPromise = null;
+          throw e;
+        });
+    }
+    glossaryFetchPromise
+      .then((entries) => {
+        if (cancelled) return;
+        setGlossary(entries);
+        setGlossaryLoading(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setGlossaryError(String(e));
+        setGlossaryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const draftList = useMemo(
     () => Object.values(drafts).sort((a, b) => a.createdAt - b.createdAt),
@@ -68,6 +126,22 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
     setSelectedDraftId(d.id);
   }
 
+  // Auto-create the first draft on entry. The investigator should land on
+  // the Builder surface immediately — no "Define a layer" empty state to
+  // dismiss. A ref guards against React StrictMode's double-mount, which
+  // would otherwise produce two empty drafts (the closed-over state in
+  // the second invocation still reads drafts === {}).
+  const autoCreatedRef = useRef(false);
+  useEffect(() => {
+    if (autoCreatedRef.current) return;
+    autoCreatedRef.current = true;
+    if (Object.keys(drafts).length > 0) return;
+    const d = newDraft();
+    setDrafts({ [d.id]: d });
+    setSelectedDraftId(d.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function updateDraft(next: QueryDraft) {
     setDrafts((s) => ({ ...s, [next.id]: next }));
   }
@@ -77,24 +151,10 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
     setRunningDraftId(selectedDraft.id);
     setError(null);
     try {
-      // Hit Overpass via the backend. The endpoint runs the query and ingests
-      // the result, but we want a "preview run" first that shows counts before
-      // baking. The simplest way without an extra backend endpoint: call the
-      // same runOverpassQuery via the store and immediately surface counts
-      // from the returned source file. We treat the "run" itself as a no-op
-      // here — counts populate when the user clicks "Add as layer". For now,
-      // mark the result as null and let "Add as layer" do both in one step.
-      //
-      // The brief asks for a results summary before the bake. Today the
-      // backend only exposes the combined "run + ingest" endpoint. To avoid
-      // scope creep into the backend, we lean on "Add as layer" to do the
-      // round trip and surface a confirmation toast instead. We keep the
-      // results card as a forward-looking seam — populated by a future
-      // dry-run endpoint.
-      updateDraft({
-        ...selectedDraft,
-        lastRunResult: { totalCount: 0, topTags: [] },
-      });
+      // Preflight (the real work) happens inside QueryEditor via its
+      // onPreflight prop. This handler stays as a no-op seam — kept so
+      // the parent can hook telemetry / spinner state without rewriting
+      // QueryEditor when a future direct-count endpoint lands.
     } catch (e) {
       setError(String(e));
     } finally {
@@ -284,7 +344,7 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
             {error}
           </div>
         )}
-        {selectedDraft ? (
+        {selectedDraft && (
           <div className="mx-auto w-full max-w-[640px] px-6 py-6">
             <QueryEditor
               draft={selectedDraft}
@@ -308,10 +368,11 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
                       })
                   : undefined
               }
+              glossaryEntries={glossary}
+              glossaryLoading={glossaryLoading}
+              glossaryError={glossaryError}
             />
           </div>
-        ) : (
-          <EmptyState onNew={createDraft} />
         )}
       </section>
     </div>
@@ -331,30 +392,5 @@ function SourcePip({ kind }: { kind: "query" | "upload" }) {
     >
       {label}
     </span>
-  );
-}
-
-function EmptyState({ onNew }: { onNew: () => void }) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-      <p
-        className="uppercase text-[var(--color-ink-faint)]"
-        style={{ fontSize: "10px", letterSpacing: "0.22em", fontWeight: 600 }}
-      >
-        Compose
-      </p>
-      <h2 className="mt-2 font-[var(--font-display)] text-2xl text-[var(--color-ink)]">
-        Define a layer
-      </h2>
-      <p className="mt-2 max-w-md text-sm text-[var(--color-ink-soft)]">
-        Compose an Overpass query to define a layer, or import a KML file from
-        a previous Overpass Turbo export.
-      </p>
-      <div className="mt-5">
-        <Button variant="primary" onClick={onNew}>
-          + New layer
-        </Button>
-      </div>
-    </div>
   );
 }
