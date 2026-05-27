@@ -126,6 +126,24 @@ export const api = {
 
   icons: () => request<IconCatalogue>("/icons"),
 
+  // ── Phase B1 (overpass queries) ─────────────────────────────────────────
+  // Compose-step bake: takes user-authored Overpass QL, the runner substitutes
+  // {{bbox}} server-side and ingests the result as a new SourceFile byte-
+  // identical to one created from an uploaded KML.
+  runOverpassQuery: (
+    projectId: number,
+    body: {
+      name: string;
+      query: string;
+      bbox: [number, number, number, number] | null;
+      region_label?: string | null;
+    },
+  ) =>
+    request<SourceFileSummary>(`/projects/${projectId}/overpass-queries`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   // ── Phase B3 (tag library) ──────────────────────────────────────────────
   // Drawer-facing endpoints. ``curated`` is local-only; the other four hit
   // Taginfo behind a 7-day on-disk cache (see backend/app/enrichment/taginfo.py).

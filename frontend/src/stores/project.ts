@@ -51,6 +51,11 @@ interface State {
    * (rendered whenever ``currentProjectId == null && mode === "project"``);
    * ``"browse"`` parks the project (if any) and routes to BrowseMode. */
   mode: "project" | "browse";
+
+  // ── Phase B1 (workflow stepper) ──
+  /** Which of the four guided steps is currently surfaced. Always one of the
+   * four — the workspace never renders without a step. */
+  workflowStep: "compose" | "style" | "review" | "export";
 }
 
 interface Actions {
@@ -100,6 +105,21 @@ interface Actions {
    * mints a fresh project; we then auto-open it and flip back to project mode
    * so the investigator lands on the new layer. */
   bakeFromBrowse: (body: BrowseBakeRequest) => Promise<BrowseBakeResponse>;
+
+  // ── Phase B1 (workflow stepper) ──
+  /** Move the workspace between Compose / Style / Review / Export. Investigators
+   * can jump freely; we don't gate on completeness. */
+  setWorkflowStep: (step: "compose" | "style" | "review" | "export") => void;
+  /** Compose-step bake. Runs the user's Overpass QL against overpass-api.de
+   * server-side and ingests the result as a new SourceFile in the active
+   * project (mirroring the ``importKml`` flow byte-for-byte). Returns the new
+   * source-file id so the caller can land selection on it. */
+  runOverpassQuery: (body: {
+    name: string;
+    query: string;
+    bbox: [number, number, number, number] | null;
+    regionLabel?: string | null;
+  }) => Promise<number>;
 }
 
 type Store = State & Actions;
@@ -156,6 +176,7 @@ export const useProjectStore = create<Store>((set, get) => ({
   busy: false,
   error: null,
   mode: "project",
+  workflowStep: "compose",
 
   setError: (error) => set({ error }),
 
@@ -398,6 +419,38 @@ export const useProjectStore = create<Store>((set, get) => ({
       await get().openProject(result.project_id);
       set({ mode: "project" });
       return result;
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    } finally {
+      set({ busy: false });
+    }
+  },
+
+  // ── Phase B1 (workflow stepper) ──
+  setWorkflowStep(step) {
+    set({ workflowStep: step });
+  },
+
+  async runOverpassQuery(body) {
+    const pid = get().currentProjectId;
+    if (pid == null) {
+      throw new Error("No active project to attach the layer to.");
+    }
+    set({ busy: true, error: null });
+    try {
+      const summary = await api.runOverpassQuery(pid, {
+        name: body.name,
+        query: body.query,
+        bbox: body.bbox,
+        region_label: body.regionLabel ?? null,
+      });
+      const detail = await api.getSourceFile(pid, summary.id);
+      set((s) => ({ sourceFiles: { ...s.sourceFiles, [summary.id]: detail } }));
+      const proj = await api.getProject(pid);
+      set({ currentProject: proj });
+      await ensureCategoryColors();
+      return summary.id;
     } catch (e) {
       set({ error: String(e) });
       throw e;
