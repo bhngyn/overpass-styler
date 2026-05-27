@@ -658,7 +658,7 @@ async def post_bake(
             raise HTTPException(status_code=502, detail="Overpass returned no usable element")
 
         layer_name = req.name or feature.get("name") or req.single_osm_id
-        raw_kml = synthesize_kml(layer_name, {"elements": [element]})
+        raw_kml, _truncation = synthesize_kml(layer_name, {"elements": [element]})
         filename = f"{layer_name}.overpass.kml"
         summary = _ingest_kml_bytes(
             db,
@@ -680,7 +680,7 @@ async def post_bake(
     except overpass.OverpassError as exc:
         raise HTTPException(status_code=502, detail=f"Overpass call failed: {exc}") from exc
 
-    raw_kml = synthesize_kml(layer_name, result)
+    raw_kml, _truncation = synthesize_kml(layer_name, result)
     filename = f"{layer_name}.overpass.kml"
     summary = _ingest_kml_bytes(
         db,

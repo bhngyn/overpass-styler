@@ -597,7 +597,7 @@ def test_bake_single_feature_matches_overpass_query_ingest(
     from app.kml.from_overpass import synthesize_kml
     from app.kml.parse import parse_kml
 
-    reference = synthesize_kml("Single bake", {"elements": [element]})
+    reference, _ = synthesize_kml("Single bake", {"elements": [element]})
     ref_parsed = parse_kml(reference)
     assert len(ref_parsed.placemarks) == 1
     ref_pm = ref_parsed.placemarks[0]

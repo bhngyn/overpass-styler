@@ -65,6 +65,20 @@ class PlacemarkPreview(BaseModel):
     has_override: bool = False
 
 
+class TruncationReportSchema(BaseModel):
+    """Surfaced on SourceFileSummary when the synthesizer hit its cap.
+
+    The shape matches L2's frontend contract: ``total`` is what Overpass
+    returned, ``ingested`` is what we kept, ``truncated`` is the *count* of
+    dropped elements (``total - ingested``) — so the UI can say "dropped
+    23,471 of 73,471 features" without doing the arithmetic itself.
+    """
+
+    total: int
+    ingested: int
+    truncated: int
+
+
 class SourceFileSummary(BaseModel):
     id: int
     filename: str
@@ -78,6 +92,9 @@ class SourceFileSummary(BaseModel):
     # affordance D3 flagged.
     overpass_query: str | None = None
     bbox_json: str | None = None
+    # Populated only on Overpass-query layers where the synthesizer hit its
+    # hard cap. Imported KMLs always serialise this as ``null``.
+    truncation: TruncationReportSchema | None = None
     model_config = ConfigDict(from_attributes=True)
 
 

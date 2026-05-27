@@ -16,13 +16,37 @@ We use lxml directly (no fancy KML library) so we never silently reorder fields.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from lxml import etree
 
 from .parse import KML_NS
 
-__all__ = ["synthesize_kml"]
+# Hard cap on the number of OSM elements we'll ingest into a single KML layer.
+# Anything above this is large enough that:
+#   * lxml memory + DB blob storage start to matter
+#   * MapLibre + Earth Pro both struggle to render the result
+#   * the investigator probably has a too-loose query
+# Surfaced through the preflight endpoint so the UI can warn before commit.
+DEFAULT_MAX_ELEMENTS = 50_000
+
+__all__ = ["synthesize_kml", "TruncationReport", "DEFAULT_MAX_ELEMENTS"]
+
+
+@dataclass(frozen=True)
+class TruncationReport:
+    """Outcome of a synthesize call.
+
+    ``total`` is the count of input Overpass elements; ``ingested`` is how
+    many became placemarks (some elements are skipped silently — e.g. ways
+    with no geometry, non-multipolygon relations). ``truncated`` is True
+    only when the input exceeded ``max_elements`` and we hard-capped.
+    """
+
+    total: int
+    ingested: int
+    truncated: bool
 
 
 def _qname(tag: str) -> str:
@@ -165,7 +189,12 @@ def _emit_multipolygon(parent: etree._Element, element: dict[str, Any]) -> bool:
     return True
 
 
-def synthesize_kml(name: str, overpass_result: dict[str, Any]) -> bytes:
+def synthesize_kml(
+    name: str,
+    overpass_result: dict[str, Any],
+    *,
+    max_elements: int = DEFAULT_MAX_ELEMENTS,
+) -> tuple[bytes, TruncationReport]:
     """Build a KML byte string from an Overpass JSON response.
 
     Parameters
@@ -177,26 +206,61 @@ def synthesize_kml(name: str, overpass_result: dict[str, Any]) -> bytes:
         A parsed Overpass JSON body (i.e. what :func:`execute_query` returns).
         Expected shape: ``{"elements": [...]}``. Unrecognised element types are
         skipped silently — Overpass occasionally adds metadata elements.
+    max_elements:
+        Upper bound on how many input elements we'll process. Anything past
+        this is silently dropped and a warning inserted into the document
+        description (so the investigator sees it in Earth Pro). Default
+        :data:`DEFAULT_MAX_ELEMENTS` = 50,000.
+
+    Returns
+    -------
+    A ``(bytes, TruncationReport)`` tuple. The bytes are the KML document,
+    byte-compatible with the existing parser; the report tells the caller
+    how many elements were dropped (if any) so the API response can surface
+    a "we truncated this layer" notice.
     """
+    elements_raw = overpass_result.get("elements") or []
+    total = len(elements_raw)
+    truncated = total > max_elements
+    elements = elements_raw[:max_elements] if truncated else elements_raw
+
     root = etree.Element(_qname("kml"), nsmap={None: KML_NS})
     doc = _sub(root, "Document")
     _sub(doc, "name", name)
 
-    for element in overpass_result.get("elements", []):
+    if truncated:
+        # Document description is shown in Earth Pro's tree view; this lets
+        # the investigator notice the cap from inside Earth Pro itself, not
+        # just our UI. Worded so the action is clear: "refine your query".
+        _sub(
+            doc,
+            "description",
+            (
+                f"Truncated: showing {max_elements:,} of {total:,} features. "
+                "Refine your query to see the rest."
+            ),
+        )
+
+    ingested = 0
+    for element in elements:
         kind = element.get("type")
+        appended = False
         if kind == "node":
-            _emit_node(doc, element)
+            appended = _emit_node(doc, element)
         elif kind == "way":
-            _emit_way(doc, element)
+            appended = _emit_way(doc, element)
         elif kind == "relation":
             tags = element.get("tags") or {}
             if tags.get("type") == "multipolygon":
-                _emit_multipolygon(doc, element)
+                appended = _emit_multipolygon(doc, element)
             else:
                 # TODO: non-multipolygon relations (routes, boundaries) need
                 # bespoke geometry assembly we haven't designed yet.
                 continue
         else:
             continue
+        if appended:
+            ingested += 1
 
-    return etree.tostring(root, xml_declaration=True, encoding="UTF-8")
+    body = etree.tostring(root, xml_declaration=True, encoding="UTF-8")
+    return body, TruncationReport(total=total, ingested=ingested, truncated=truncated)

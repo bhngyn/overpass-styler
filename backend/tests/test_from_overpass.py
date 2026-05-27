@@ -104,20 +104,25 @@ def overpass_result() -> dict:
 
 
 def test_synthesized_kml_parses_cleanly(overpass_result: dict):
-    raw = synthesize_kml("smoke test", overpass_result)
+    raw, report = synthesize_kml("smoke test", overpass_result)
     parsed = parse_kml(raw)
     assert parsed.document_name == "smoke test"
     assert len(parsed.placemarks) == 4
+    assert report.truncated is False
+    assert report.total == 4
+    assert report.ingested == 4
 
 
 def test_geometry_kinds_match_overpass_shape(overpass_result: dict):
-    parsed = parse_kml(synthesize_kml("k", overpass_result))
+    raw, _ = synthesize_kml("k", overpass_result)
+    parsed = parse_kml(raw)
     kinds = [pm.geometry.kind for pm in parsed.placemarks if pm.geometry]
     assert kinds == ["Point", "LineString", "Polygon", "Polygon"]
 
 
 def test_polygon_with_inner_ring_round_trips(overpass_result: dict):
-    parsed = parse_kml(synthesize_kml("k", overpass_result))
+    raw, _ = synthesize_kml("k", overpass_result)
+    parsed = parse_kml(raw)
     relation_pm = parsed.placemarks[-1]
     assert relation_pm.geometry is not None
     assert relation_pm.geometry.kind == "Polygon"
@@ -126,7 +131,8 @@ def test_polygon_with_inner_ring_round_trips(overpass_result: dict):
 
 
 def test_osm_tags_preserved_with_insertion_order(overpass_result: dict):
-    parsed = parse_kml(synthesize_kml("k", overpass_result))
+    raw, _ = synthesize_kml("k", overpass_result)
+    parsed = parse_kml(raw)
     closed_way_pm = parsed.placemarks[2]
     # `@id` is emitted first, then the OSM tags in the order Overpass sent them.
     assert closed_way_pm.extended_data_order == [
@@ -140,7 +146,8 @@ def test_osm_tags_preserved_with_insertion_order(overpass_result: dict):
 
 
 def test_atid_present_and_matches_type_id(overpass_result: dict):
-    parsed = parse_kml(synthesize_kml("k", overpass_result))
+    raw, _ = synthesize_kml("k", overpass_result)
+    parsed = parse_kml(raw)
     expected = ["node/100", "way/200", "way/300", "relation/400"]
     assert [pm.extended_data["@id"] for pm in parsed.placemarks] == expected
 
@@ -160,26 +167,29 @@ def test_placemark_name_falls_back_to_type_slash_id():
             }
         ]
     }
-    parsed = parse_kml(synthesize_kml("k", result))
+    raw, _ = synthesize_kml("k", result)
+    parsed = parse_kml(raw)
     assert parsed.placemarks[0].name == "way/200"
 
 
 def test_placemark_name_uses_name_tag_when_present(overpass_result: dict):
-    parsed = parse_kml(synthesize_kml("k", overpass_result))
+    raw, _ = synthesize_kml("k", overpass_result)
+    parsed = parse_kml(raw)
     assert parsed.placemarks[0].name == "Test Node"
     assert parsed.placemarks[2].name == "Closed Site"
     assert parsed.placemarks[3].name == "Cemetery with courtyard"
 
 
 def test_coordinate_precision_preserved(overpass_result: dict):
-    parsed = parse_kml(synthesize_kml("k", overpass_result))
+    raw, _ = synthesize_kml("k", overpass_result)
+    parsed = parse_kml(raw)
     node_pm = parsed.placemarks[0]
     assert node_pm.geometry is not None
     assert node_pm.geometry.point == f"{HIGH_PRECISION_LON},{HIGH_PRECISION_LAT}"
     # The literal high-precision token should appear in the serialised bytes too.
-    raw = synthesize_kml("k", overpass_result)
-    assert str(HIGH_PRECISION_LON).encode() in raw
-    assert str(HIGH_PRECISION_LAT).encode() in raw
+    raw2, _ = synthesize_kml("k", overpass_result)
+    assert str(HIGH_PRECISION_LON).encode() in raw2
+    assert str(HIGH_PRECISION_LAT).encode() in raw2
 
 
 def test_non_multipolygon_relation_is_skipped():
@@ -200,14 +210,57 @@ def test_non_multipolygon_relation_is_skipped():
             },
         ]
     }
-    parsed = parse_kml(synthesize_kml("k", result))
+    raw, _ = synthesize_kml("k", result)
+    parsed = parse_kml(raw)
     # Only the node survived.
     assert len(parsed.placemarks) == 1
     assert parsed.placemarks[0].extended_data["@id"] == "node/501"
 
 
 def test_empty_elements_yields_valid_empty_document():
-    raw = synthesize_kml("empty", {"elements": []})
+    raw, report = synthesize_kml("empty", {"elements": []})
     parsed = parse_kml(raw)
     assert parsed.document_name == "empty"
     assert parsed.placemarks == []
+    assert report.total == 0
+    assert report.ingested == 0
+    assert report.truncated is False
+
+
+def test_synthesize_truncates_above_max_elements():
+    """When input exceeds max_elements we cap, emit a warning description,
+    and the report flags the truncation."""
+    elements = [
+        {
+            "type": "node",
+            "id": i,
+            "lon": float(i) * 0.001,
+            "lat": float(i) * 0.001,
+            "tags": {"amenity": "prison"},
+        }
+        for i in range(10)
+    ]
+    raw, report = synthesize_kml("cap-test", {"elements": elements}, max_elements=3)
+    assert report.total == 10
+    assert report.truncated is True
+    # ingested counts only the first 3 elements that were actually processed.
+    assert report.ingested == 3
+    parsed = parse_kml(raw)
+    assert len(parsed.placemarks) == 3
+    # The warning lands in the document description so Earth Pro shows it too.
+    assert parsed.document_description is not None
+    assert "Truncated" in parsed.document_description
+    assert "3" in parsed.document_description
+    assert "10" in parsed.document_description
+
+
+def test_synthesize_at_exact_cap_is_not_truncated():
+    """Boundary case: count == max_elements isn't truncation."""
+    elements = [
+        {"type": "node", "id": i, "lon": 0.0, "lat": 0.0, "tags": {}}
+        for i in range(5)
+    ]
+    _, report = synthesize_kml("k", {"elements": elements}, max_elements=5)
+    assert report.truncated is False
+    assert report.total == 5
+    assert report.ingested == 5

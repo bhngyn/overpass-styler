@@ -224,3 +224,164 @@ def test_layer_appears_in_project_detail(
     assert proj["source_files"][0]["category_key"] == "amenity"
     # The project's denormalised category hint should pick up the new layer.
     assert proj["category_key"] == "amenity"
+
+
+# ---------------------------------------------------------------------------
+# Compose-step preflight + synthesizer truncation
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_endpoint_returns_count(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """The Compose-step preflight wraps execute_count and surfaces the total."""
+    from app.api import projects as projects_module
+
+    async def fake_count(ql_body: str, *, timeout: int | None = None, area_hint_km2=None) -> int:
+        return 1234
+
+    monkeypatch.setattr(projects_module.overpass, "execute_count", fake_count)
+
+    pid = _make_project(client)
+    r = client.post(
+        f"/api/projects/{pid}/overpass-queries/preflight",
+        json={
+            "query": "node[amenity=prison]({{bbox}});out geom;",
+            "bbox": [14.0, 11.0, 16.0, 13.0],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total_count"] == 1234
+    assert body["too_large"] is False
+    assert body["hard_cap"] == 50_000
+    # Size estimate is total * 200 + 5KB.
+    assert body["estimated_kml_bytes"] == 1234 * 200 + 5_000
+
+
+def test_preflight_endpoint_flags_too_large(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Counts above the hard cap come back with too_large: true."""
+    from app.api import projects as projects_module
+
+    async def fake_count(ql_body: str, *, timeout: int | None = None, area_hint_km2=None) -> int:
+        return 75_000
+
+    monkeypatch.setattr(projects_module.overpass, "execute_count", fake_count)
+
+    pid = _make_project(client)
+    r = client.post(
+        f"/api/projects/{pid}/overpass-queries/preflight",
+        json={
+            "query": "nwr({{bbox}});out;",
+            "bbox": [14.0, 11.0, 16.0, 13.0],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total_count"] == 75_000
+    assert body["too_large"] is True
+
+
+def test_preflight_endpoint_strips_outer_statements(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """The QL body handed to execute_count is stripped of settings + out."""
+    from app.api import projects as projects_module
+
+    captured: dict = {}
+
+    async def fake_count(ql_body: str, *, timeout: int | None = None, area_hint_km2=None) -> int:
+        captured["body"] = ql_body
+        return 42
+
+    monkeypatch.setattr(projects_module.overpass, "execute_count", fake_count)
+
+    pid = _make_project(client)
+    r = client.post(
+        f"/api/projects/{pid}/overpass-queries/preflight",
+        json={
+            "query": "[out:json][timeout:25];node[amenity=prison](40,-75,41,-74);out geom;",
+        },
+    )
+    assert r.status_code == 200, r.text
+    # No leading settings line, no trailing out — execute_count will wrap.
+    assert not captured["body"].startswith("[")
+    assert "out geom" not in captured["body"]
+
+
+def test_preflight_endpoint_rejects_oversized_query_string(
+    client: TestClient
+):
+    pid = _make_project(client)
+    r = client.post(
+        f"/api/projects/{pid}/overpass-queries/preflight",
+        json={"query": "x" * 20_001},
+    )
+    assert r.status_code == 422
+
+
+def test_overpass_endpoint_surfaces_truncation(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """When the synthesizer hits its cap, the response carries a truncation report."""
+    from app.api import projects as projects_module
+
+    # Return more elements than the synthesizer cap so it has to truncate.
+    big_result = {
+        "elements": [
+            {
+                "type": "node",
+                "id": i,
+                "lon": 15.0,
+                "lat": 12.0,
+                "tags": {"amenity": "prison"},
+            }
+            for i in range(60_000)
+        ]
+    }
+
+    async def fake_query(ql: str, *, timeout: int | None = None, area_hint_km2=None) -> dict:
+        return big_result
+
+    monkeypatch.setattr(projects_module.overpass, "execute_query", fake_query)
+
+    pid = _make_project(client)
+    r = client.post(
+        f"/api/projects/{pid}/overpass-queries",
+        json={
+            "name": "too-many",
+            "query": "nwr({{bbox}});out;",
+            "bbox": [14.0, 11.0, 16.0, 13.0],
+        },
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["truncation"] is not None
+    assert body["truncation"]["total"] == 60_000
+    assert body["truncation"]["ingested"] == 50_000
+    # L2 contract: ``truncated`` is the diff (count dropped), not a bool.
+    assert body["truncation"]["truncated"] == 10_000
+
+
+def test_overpass_endpoint_rejects_oversized_name(client: TestClient):
+    pid = _make_project(client)
+    r = client.post(
+        f"/api/projects/{pid}/overpass-queries",
+        json={"name": "x" * 201, "query": "node;out;"},
+    )
+    assert r.status_code == 422
+
+
+def test_overpass_endpoint_rejects_nan_bbox():
+    """Pydantic validator rejects NaN in the request bbox."""
+    from pydantic import ValidationError
+    from app.api.projects import _OverpassQueryRequest
+
+    with pytest.raises(ValidationError):
+        _OverpassQueryRequest(
+            name="x",
+            query="node;out;",
+            bbox=[float("nan"), 0.0, 1.0, 1.0],
+        )

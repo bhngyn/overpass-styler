@@ -38,6 +38,7 @@ from .schemas import (
     SetCategoryStyleRequest,
     SourceFileDetail,
     SourceFileSummary,
+    TruncationReportSchema,
     UpdateProjectRequest,
 )
 
@@ -330,20 +331,6 @@ class _OverpassPreflightRequest(BaseModel):
         return _check_finite_bbox(v)
 
 
-class TruncationReportSchema(BaseModel):
-    total: int
-    ingested: int
-    truncated: bool
-
-
-class IngestEnvelope(BaseModel):
-    """Wraps :class:`SourceFileSummary` with the truncation info Overpass
-    callers need to surface a "we capped this" warning to the investigator."""
-
-    source_file: SourceFileSummary
-    truncation: TruncationReportSchema
-
-
 class OverpassPreflightResponse(BaseModel):
     total_count: int
     estimated_kml_bytes: int
@@ -369,6 +356,69 @@ def _substitute_bbox(query: str, bbox: list[float] | None) -> str:
     return _BBOX_PLACEHOLDER_RE.sub(f"{south},{west},{north},{east}", query)
 
 
+# Strip a leading ``[out:...][timeout:...];`` settings line + any trailing
+# ``out body;`` / ``out geom;`` / etc. so execute_count can wrap a clean body.
+_LEADING_SETTINGS_RE = re.compile(r"^\s*(?:\[[^\]]+\]\s*)+;")
+_TRAILING_OUT_RE = re.compile(r"\bout\s+[^;]*;\s*$", re.IGNORECASE)
+
+
+def _strip_outer_statements(ql: str) -> str:
+    """Reduce a user-authored QL to the bare set-selection body.
+
+    ``execute_count`` wraps the body in its own ``[out:json]...; out count;``
+    so the user's settings line + trailing ``out`` statement would otherwise
+    fight for control. This best-effort cleanup catches the common patterns;
+    pathological inputs fall through to Overpass which surfaces a syntax
+    error the investigator can fix.
+    """
+    stripped = _LEADING_SETTINGS_RE.sub("", ql).strip()
+    while True:
+        new = _TRAILING_OUT_RE.sub("", stripped).strip()
+        if new == stripped:
+            break
+        stripped = new
+    return stripped.rstrip(";").strip()
+
+
+@router.post(
+    "/{project_id}/overpass-queries/preflight",
+    response_model=OverpassPreflightResponse,
+)
+async def preflight_overpass_query(
+    project_id: int,
+    req: _OverpassPreflightRequest,
+    session: Session = Depends(get_session),
+) -> OverpassPreflightResponse:
+    """Cheap "how big would this layer be?" probe before committing.
+
+    Wraps the user's QL body in ``out count;`` so Overpass only returns the
+    element cardinality, not geometry. The frontend uses this to show
+    "47 features" before the investigator clicks "Add as layer", and to
+    refuse anything past the synthesizer's hard cap with a useful message.
+    """
+    _load_project(session, project_id)  # 404 early if project doesn't exist
+
+    substituted = _substitute_bbox(req.query, req.bbox)
+    body = _strip_outer_statements(substituted)
+
+    try:
+        total = await overpass.execute_count(body)
+    except overpass.OverpassError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    # Rough KML size estimate: each placemark serialises to ~150-300 bytes
+    # (extended data is the bulk), plus a ~5KB document overhead. The
+    # frontend shows this so investigators with slow disks notice big
+    # downloads coming.
+    estimated_bytes = total * 200 + 5_000
+    return OverpassPreflightResponse(
+        total_count=total,
+        estimated_kml_bytes=estimated_bytes,
+        too_large=total > DEFAULT_MAX_ELEMENTS,
+        hard_cap=DEFAULT_MAX_ELEMENTS,
+    )
+
+
 @router.post(
     "/{project_id}/overpass-queries",
     response_model=SourceFileSummary,
@@ -384,6 +434,11 @@ async def run_overpass_query(
     The original (un-substituted) query is stored on the resulting SourceFile
     so the UI can show what the investigator typed, not the bbox-expanded
     payload Overpass actually saw.
+
+    When the synthesizer's hard cap kicks in we still ingest the truncated
+    result (the investigator gets *some* output), and the response's
+    ``truncation`` field surfaces ``{total, ingested, truncated}`` so the
+    UI can warn that data was dropped.
     """
     proj = _load_project(session, project_id)
 
@@ -393,13 +448,9 @@ async def run_overpass_query(
     except overpass.OverpassError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    # synthesize_kml returns (bytes, TruncationReport) — L1's cap-aware
-    # synthesizer truncates very large results gracefully and tells us how
-    # many elements were dropped. The truncation info isn't yet surfaced
-    # through this endpoint; the schema envelope upgrade is L2's territory.
-    raw_kml, _truncation = synthesize_kml(req.name, result)
+    raw_kml, report = synthesize_kml(req.name, result)
     filename = f"{req.name}.overpass.kml"
-    return _ingest_kml_bytes(
+    summary = _ingest_kml_bytes(
         session,
         proj,
         filename,
@@ -407,6 +458,15 @@ async def run_overpass_query(
         overpass_query=req.query,
         bbox=req.bbox,
     )
+    if report.truncated:
+        # L2's TruncationReport uses ``truncated`` as the count of dropped
+        # elements (display sugar), not a bool. Compute the diff here.
+        summary.truncation = TruncationReportSchema(
+            total=report.total,
+            ingested=report.ingested,
+            truncated=report.total - report.ingested,
+        )
+    return summary
 
 
 @router.get("/{project_id}/source-files/{source_file_id}", response_model=SourceFileDetail)
