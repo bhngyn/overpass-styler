@@ -21,7 +21,7 @@
  * onAddAsLayer. Parent (ComposeStep) also fetches and shares the curated
  * glossary so multiple editors can read from the same response.
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { FieldShell, TextInput } from "@/components/ui/Field";
 import { BboxPicker, type Bbox } from "@/components/BboxPicker";
@@ -73,7 +73,7 @@ export interface QueryEditorProps {
   draft: QueryDraft;
   onChange: (next: QueryDraft) => void;
   onRun: () => Promise<void>;
-  onAddAsLayer: () => Promise<void>;
+  onAddAsLayer: (signal?: AbortSignal) => Promise<void>;
   running: boolean;
   adding?: boolean;
   /** Opens the Tag Library drawer. The Builder uses this for the
@@ -85,10 +85,12 @@ export interface QueryEditorProps {
   /** L2 preflight — when supplied, the Run button hits this first to surface
    * counts + estimated size + over-cap warnings before the operator commits
    * to the full bake. The parent owns the network call so the QueryEditor
-   * stays pure with respect to API access. */
+   * stays pure with respect to API access. Pass through the signal so the
+   * Cancel button can abort an in-flight preflight. */
   onPreflight?: (
     query: string,
     bbox: Bbox | null,
+    signal?: AbortSignal,
   ) => Promise<OverpassQueryPreflightResponse>;
   /** Curated glossary, fetched once by the parent. */
   glossaryEntries: GlossaryEntry[];
@@ -124,6 +126,22 @@ export function QueryEditor({
     useState<OverpassQueryPreflightResponse | null>(null);
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [preflightError, setPreflightError] = useState<string | null>(null);
+  // One controller drives Cancel for either the preflight or the bake — at
+  // most one is in flight at a time. ``useRef`` keeps the controller stable
+  // across renders so the button click reaches the right instance.
+  const abortRef = useRef<AbortController | null>(null);
+  // Abort whatever's pending if the component unmounts mid-flight (the user
+  // navigated away). Backend keeps running, but we don't pollute state.
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
+
+  function handleCancel() {
+    abortRef.current?.abort();
+    abortRef.current = null;
+  }
 
   function insertAtCursor(text: string) {
     const ta = taRef.current;
@@ -163,14 +181,15 @@ export function QueryEditor({
       await onRun();
       return;
     }
+    // Cancel any prior in-flight preflight before starting a new one.
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setPreflightLoading(true);
     setPreflightError(null);
     try {
-      const result = await onPreflight(draft.query, draft.bbox);
+      const result = await onPreflight(draft.query, draft.bbox, controller.signal);
       setPreflightResult(result);
-      // Surface counts via the existing draft.lastRunResult shape so the
-      // layer-stack card in ComposeStep still reads non-zero — without
-      // re-doing the wider draft shape for one number.
       onChange({
         ...draft,
         lastRunResult: {
@@ -179,14 +198,27 @@ export function QueryEditor({
         },
       });
     } catch (e) {
-      setPreflightError(String(e));
+      // Cancelled by the operator — clear the spinner without surfacing an
+      // error, since there's nothing for them to fix.
+      const aborted =
+        typeof e === "object" &&
+        e !== null &&
+        "isAbort" in e &&
+        (e as { isAbort?: boolean }).isAbort === true;
+      if (aborted) {
+        setPreflightError(null);
+      } else {
+        const detail =
+          typeof e === "object" && e !== null && "detail" in e
+            ? String((e as { detail?: unknown }).detail ?? "")
+            : "";
+        setPreflightError(detail || (e instanceof Error ? e.message : String(e)));
+      }
       setPreflightResult(null);
     } finally {
       setPreflightLoading(false);
+      if (abortRef.current === controller) abortRef.current = null;
     }
-    // Keep the legacy onRun in the loop so the parent can record telemetry
-    // / clear other state. It's a no-op in the current ComposeStep, so
-    // calling it after preflight is safe.
     await onRun();
   }
 
@@ -358,6 +390,7 @@ export function QueryEditor({
           glossaryEntries={glossaryEntries}
           glossaryLoading={glossaryLoading}
           glossaryError={glossaryError}
+          onOpenTagLibrary={onOpenTagLibrary}
         />
       ) : (
         <div>
@@ -426,14 +459,24 @@ export function QueryEditor({
         <Button
           variant="primary"
           onClick={() => void attemptRun()}
-          disabled={running || preflightLoading || draft.query.trim().length === 0}
+          disabled={running || preflightLoading || adding || draft.query.trim().length === 0}
         >
           {running || preflightLoading ? "Running…" : "Run query"}
         </Button>
-        {(running || preflightLoading) && (
-          <span className="text-[11px] text-[var(--color-ink-faint)]">
-            Calling overpass-api.de…
-          </span>
+        {(running || preflightLoading || adding) && (
+          <>
+            <span className="text-[11px] text-[var(--color-ink-faint)]">
+              {adding ? "Baking layer…" : "Calling overpass-api.de…"}
+            </span>
+            <Button
+              variant="secondary"
+              onClick={handleCancel}
+              className="ml-1 px-2 py-0.5 text-[11px]"
+              title="Cancel the in-flight request"
+            >
+              Cancel
+            </Button>
+          </>
         )}
       </div>
 
@@ -463,9 +506,17 @@ export function QueryEditor({
       {(preflightResult || draft.lastRunResult) && (
         <Button
           variant="primary"
-          onClick={() => void onAddAsLayer()}
+          onClick={() => {
+            abortRef.current?.abort();
+            const controller = new AbortController();
+            abortRef.current = controller;
+            void onAddAsLayer(controller.signal).finally(() => {
+              if (abortRef.current === controller) abortRef.current = null;
+            });
+          }}
           disabled={
             adding ||
+            running ||
             preflightLoading ||
             // Don't let the operator commit to a known-too-large bake.
             (preflightResult?.too_large ?? false)
@@ -598,6 +649,14 @@ function EstimateCard({ result }: { result: OverpassQueryPreflightResponse }) {
       <p className="mt-1 text-[11px] italic text-[var(--color-ink-faint)]">
         Within the {result.hard_cap.toLocaleString()}-feature cap.
       </p>
+      {result.served_by && (
+        <p
+          className="mt-1 text-[10px] text-[var(--color-ink-faint)]"
+          title="The primary Overpass mirror was unavailable; the request was routed through a fallback."
+        >
+          routed via {result.served_by}
+        </p>
+      )}
     </div>
   );
 }

@@ -53,7 +53,7 @@ function DomainGlyph({ name }: { name: string }) {
   );
 }
 
-interface DrillScope {
+export interface DrillScope {
   domain: string;
   key: string | null;
   value: string | null;
@@ -67,6 +67,12 @@ interface Props {
   inventoryFetchedAt: number | null;
   hoveredOsmId: string | null;
   selectedOsmId: string | null;
+  /** Lifted to BrowseMode so the map can react to drill changes (narrow
+   * dots to the active domain, dim the rest). Owned upstream so a
+   * domain-card click can simultaneously update both rail and map without
+   * a callback dance. */
+  drill: DrillScope | null;
+  onDrillChange: (drill: DrillScope | null) => void;
   onHoverItem: (osmId: string | null) => void;
   onSelectItem: (osmId: string) => void;
   onRefetch: () => void;
@@ -80,17 +86,17 @@ export function InventoryRail({
   inventoryFetchedAt,
   hoveredOsmId,
   selectedOsmId,
+  drill,
+  onDrillChange,
   onHoverItem,
   onSelectItem,
   onRefetch,
 }: Props) {
-  const [drill, setDrill] = useState<DrillScope | null>(null);
   const [search, setSearch] = useState("");
 
-  // Reset drill state when the bbox changes — different area = different
-  // inventory. Without this you'd land in a stale drill-in.
+  // Reset search when the bbox changes. Drill is owned upstream and the
+  // parent clears it on bbox change for the same reason.
   useEffect(() => {
-    setDrill(null);
     setSearch("");
   }, [bbox.join(",")]);
 
@@ -111,7 +117,13 @@ export function InventoryRail({
           type="search"
           value={search}
           onChange={(e) => setSearch(e.currentTarget.value)}
-          placeholder={drill ? "Filter features…" : "Filter domains…"}
+          placeholder={
+            drill
+              ? drill.key && drill.value
+                ? "Filter features…"
+                : "Filter tags…"
+              : "Filter domains…"
+          }
           className="w-full rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] px-2.5 py-1.5 text-sm text-[var(--color-ink)] placeholder:text-[var(--color-ink-faint)] focus:border-[var(--color-accent)] focus:outline-none"
         />
       </div>
@@ -122,27 +134,52 @@ export function InventoryRail({
             {inventoryError}
           </div>
         ) : inventoryLoading && !inventory ? (
-          <div className="p-4 text-sm italic text-[var(--color-ink-faint)]">
-            Querying Overpass — this can take 10–30s for a fresh bbox.
+          <div className="p-4">
+            <div className="flex items-center gap-2 text-sm italic text-[var(--color-ink-faint)]">
+              <span>Querying Overpass</span>
+              <span className="flex gap-0.5" aria-hidden="true">
+                <span className="loading-dot inline-block h-1 w-1 rounded-full bg-[var(--color-accent)]" />
+                <span className="loading-dot inline-block h-1 w-1 rounded-full bg-[var(--color-accent)]" />
+                <span className="loading-dot inline-block h-1 w-1 rounded-full bg-[var(--color-accent)]" />
+              </span>
+            </div>
+            <div className="mt-1 text-xs text-[var(--color-ink-faint)]">
+              This can take 10–30s for a fresh bbox.
+            </div>
+            <div className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--color-line)]">
+              <div className="indeterminate-sweep rounded-full bg-[var(--color-accent)]" />
+            </div>
           </div>
         ) : inventory && inventory.area_capped ? (
           <AreaCappedView inventory={inventory} />
         ) : drill && inventory && !inventory.area_capped ? (
-          <DrillInView
-            bbox={bbox}
-            scope={drill}
-            search={search}
-            hoveredOsmId={hoveredOsmId}
-            selectedOsmId={selectedOsmId}
-            onBack={() => setDrill(null)}
-            onHoverItem={onHoverItem}
-            onSelectItem={onSelectItem}
-          />
+          drill.key && drill.value ? (
+            <DrillInView
+              bbox={bbox}
+              scope={drill}
+              search={search}
+              hoveredOsmId={hoveredOsmId}
+              selectedOsmId={selectedOsmId}
+              onBack={() => onDrillChange(null)}
+              onHoverItem={onHoverItem}
+              onSelectItem={onSelectItem}
+            />
+          ) : (
+            <TagBreakdownView
+              domain={drill.domain}
+              inventory={inventory}
+              search={search}
+              onBack={() => onDrillChange(null)}
+              onPickTag={(key, value) =>
+                onDrillChange({ domain: drill.domain, key, value })
+              }
+            />
+          )
         ) : inventory && !inventory.area_capped && inventory.domains ? (
           <DomainCardsView
             domains={inventory.domains}
             search={search}
-            onDrill={(d) => setDrill(d)}
+            onDrill={(d) => onDrillChange(d)}
           />
         ) : (
           <div className="p-4 text-sm italic text-[var(--color-ink-faint)]">
@@ -298,11 +335,11 @@ function DomainCardsView({
           key={d.name}
           domain={d}
           onClick={() =>
-            onDrill({
-              domain: d.name,
-              key: d.top_tags[0]?.key ?? null,
-              value: d.top_tags[0]?.value ?? null,
-            })
+            // Header click → tag-breakdown view (the full categorical
+            // tag list for this domain). The chips below still drill
+            // straight to the per-feature items list when the operator
+            // already knows which tag they care about.
+            onDrill({ domain: d.name, key: null, value: null })
           }
           onClickTag={(key, value) =>
             onDrill({ domain: d.name, key, value })
@@ -365,6 +402,109 @@ function DomainCard({
             </button>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * TagBreakdownView — the answer to "what tags exist in this area?".
+ *
+ * Rendered when the operator has drilled into a domain card without
+ * picking a specific tag chip. Lists every categorical (key=value) pair
+ * the backend tallied for this domain, sorted by count desc, with a
+ * shared filter input from the rail. Click a row → drill further into
+ * the per-feature items list (DrillInView), which is what the existing
+ * chip-click path already does.
+ *
+ * The backend caps the list at DOMAIN_TAG_CAP (200 entries) — large
+ * enough that we never feel artificially truncated for typical bboxes,
+ * small enough that filtering 200 rows stays instant. If a domain
+ * actually exceeds the cap the response carries the top 200 by count;
+ * a "+ N more" hint isn't shown because we don't currently surface the
+ * pre-cap total — a future polish if the cap starts biting in practice.
+ */
+function TagBreakdownView({
+  domain,
+  inventory,
+  search,
+  onBack,
+  onPickTag,
+}: {
+  domain: string;
+  inventory: BrowseInventoryResponse;
+  search: string;
+  onBack: () => void;
+  onPickTag: (key: string, value: string) => void;
+}) {
+  const domainSummary = useMemo(
+    () => (inventory.domains ?? []).find((d) => d.name === domain) ?? null,
+    [inventory.domains, domain],
+  );
+  const tags = domainSummary?.tags ?? [];
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return tags;
+    return tags.filter(
+      (t) =>
+        t.key.toLowerCase().includes(q) ||
+        t.value.toLowerCase().includes(q) ||
+        `${t.key}=${t.value}`.toLowerCase().includes(q),
+    );
+  }, [tags, search]);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-line)] px-3 py-2">
+        <button
+          type="button"
+          onClick={onBack}
+          className="text-[var(--color-ink-soft)] hover:text-[var(--color-ink)]"
+          aria-label="Back to domain cards"
+          title="Back"
+        >
+          ←
+        </button>
+        <div className="flex items-center gap-1.5">
+          <DomainGlyph name={domain} />
+          <span className="text-xs uppercase tracking-wider text-[var(--color-ink-faint)]">
+            {domain}
+          </span>
+        </div>
+        <span className="ml-auto font-[var(--font-mono)] text-[10px] text-[var(--color-ink-faint)]">
+          {tags.length} {tags.length === 1 ? "tag" : "tags"}
+        </span>
+      </div>
+      {tags.length === 0 ? (
+        <div className="shrink-0 p-3 text-sm italic text-[var(--color-ink-faint)]">
+          No categorical tags recorded for {domain} in this bbox.
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="shrink-0 p-3 text-sm italic text-[var(--color-ink-faint)]">
+          No tags match “{search}”.
+        </div>
+      ) : (
+        <ul className="min-h-0 flex-1 overflow-y-auto">
+          {filtered.map((t) => (
+            <li key={`${t.key}=${t.value}`}>
+              <button
+                type="button"
+                onClick={() => onPickTag(t.key, t.value)}
+                className="flex w-full items-center gap-2 border-b border-[var(--color-line)] px-3 py-1.5 text-left hover:bg-[var(--color-surface-sunken)]"
+                title={`Drill into ${t.key}=${t.value}`}
+              >
+                <code className="truncate font-[var(--font-mono)] text-[11px] text-[var(--color-ink)]">
+                  <span className="text-[var(--color-ink-soft)]">{t.key}=</span>
+                  {t.value}
+                </code>
+                <span className="ml-auto font-[var(--font-mono)] text-[11px] text-[var(--color-ink-soft)]">
+                  ×{t.count.toLocaleString()}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );

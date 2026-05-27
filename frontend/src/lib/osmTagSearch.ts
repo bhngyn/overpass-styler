@@ -99,6 +99,35 @@ export function searchOsmTags(q: string, limit = 50): OsmTagHit[] {
   return hits.slice(0, limit);
 }
 
+/** All bundled OSM tag entries sorted by global usage count desc.
+ *
+ *  Memoised once at module load so callers can render the full list as
+ *  the empty-query state of the browse pane (~21k entries — virtualize
+ *  on render). Use ``filterOsmTags`` below for a live-typing filter that
+ *  reuses the same ranking but trims by query.
+ */
+export const TAGINFO_INDEX_BY_COUNT: readonly TaginfoIndexEntry[] = (() => {
+  const all = TAGINFO_INDEX.slice();
+  all.sort((a, b) => b.count - a.count);
+  return all;
+})();
+
+
+/** Live-filter the offline tag index by a free-form query, falling back to
+ *  the full popularity-sorted list when ``q`` is empty.
+ *
+ *  This is the function powering the Tag Library's flat "All OSM tags"
+ *  list — empty input shows everything, a typed query narrows in via the
+ *  same ranking ``searchOsmTags`` uses (so ``amenity=bench`` jumps to
+ *  the top instantly).
+ */
+export function filterOsmTags(q: string, limit = 5000): readonly TaginfoIndexEntry[] {
+  const trimmed = q.trim();
+  if (!trimmed) return TAGINFO_INDEX_BY_COUNT.slice(0, limit);
+  return searchOsmTags(trimmed, limit).map((h) => h.entry);
+}
+
+
 /** Group hits by their ``key`` for the picker's "organized by key" layout.
  *
  *  Preserves the within-group ranking from ``searchOsmTags`` (entries

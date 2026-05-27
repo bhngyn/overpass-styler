@@ -95,6 +95,10 @@ class SourceFileSummary(BaseModel):
     # Populated only on Overpass-query layers where the synthesizer hit its
     # hard cap. Imported KMLs always serialise this as ``null``.
     truncation: TruncationReportSchema | None = None
+    # Hostname of the Overpass mirror that served this layer, only when it
+    # isn't the primary endpoint. The UI uses this to show a quiet "routed
+    # via …" footnote so investigators notice their normal mirror was down.
+    served_by: str | None = None
     model_config = ConfigDict(from_attributes=True)
 
 

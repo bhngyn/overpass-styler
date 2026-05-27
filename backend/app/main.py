@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -14,6 +15,25 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import annotations, browse, enrich, icons, presets, projects, tag_library
 from app.db.session import init_db
+
+
+def _configure_logging() -> None:
+    """One-shot root logger setup so ``logger.exception(...)`` in routers
+    actually surfaces tracebacks in ``docker compose logs``.
+
+    Uvicorn installs its own access/error loggers; we only configure the
+    root if nothing else has, so we don't fight the dev server's format.
+    """
+    if logging.getLogger().handlers:
+        return
+    level = os.environ.get("OVERPASS_STYLER_LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+
+_configure_logging()
 
 
 @asynccontextmanager

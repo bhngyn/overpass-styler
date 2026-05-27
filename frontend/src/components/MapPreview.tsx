@@ -7,6 +7,7 @@ import { defaultFeatureStyle, DEFAULT_ICON_HREF } from "@/lib/defaults";
 import { rgbaToCss } from "@/lib/kmlColor";
 import { buildTintedIcon, iconCacheKey } from "@/lib/iconBitmap";
 import type { FeatureStyle } from "@/lib/types";
+import { setWorkspaceMap, subscribeWorkspaceDrawing } from "@/lib/workspaceMap";
 import { MapLegend } from "./MapLegend";
 
 /** Basemap options.
@@ -132,6 +133,12 @@ export function MapPreview() {
   const [error, setError] = useState<string | null>(null);
   const [basemap, setBasemap] = useState<Basemap>("streets");
   const [legendCollapsed, setLegendCollapsed] = useState(false);
+  const [drawing, setDrawing] = useState(false);
+
+  // Reflect the BboxPicker's "draw armed" signal so we can render a
+  // coaching pill over the map. The BboxPicker flips this through the
+  // workspaceMap registry; we just subscribe.
+  useEffect(() => subscribeWorkspaceDrawing(setDrawing), []);
   /** Single popup instance reused across hover events. Re-creating per event
    * stresses the DOM and the close animation. */
   const popupRef = useRef<maplibregl.Popup | null>(null);
@@ -292,6 +299,10 @@ export function MapPreview() {
         }
 
         setLayersReady(true);
+        // Publish to the workspace-map registry so the BboxPicker (a
+        // descendant of ComposeStep) can drive draw + bbox-overlay on the
+        // same map instance instead of mounting its own.
+        setWorkspaceMap(map);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -303,6 +314,7 @@ export function MapPreview() {
       try { map.remove(); } catch { /* ignore */ }
       mapRef.current = null;
       setLayersReady(false);
+      setWorkspaceMap(null);
     };
   }, [setSelection]);
 
@@ -642,6 +654,18 @@ export function MapPreview() {
         collapsed={legendCollapsed}
         onToggle={() => setLegendCollapsed((c) => !c)}
       />
+
+      {/* Draw-mode coaching pill — visible whenever the BboxPicker has
+          armed draw mode on this map. The actual drag handlers live in
+          startBboxDraw; this is just a hint. */}
+      {drawing && (
+        <div
+          className="pointer-events-none absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded-md border border-[var(--color-accent)] bg-white/95 px-3 py-1.5 text-[11px] uppercase tracking-wider text-[var(--color-accent)] shadow-sm"
+          aria-live="polite"
+        >
+          Drag on the map to draw · Esc to cancel
+        </div>
+      )}
 
       {error && (
         <div

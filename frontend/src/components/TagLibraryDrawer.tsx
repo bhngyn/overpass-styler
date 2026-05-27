@@ -33,7 +33,6 @@ import { TagLibraryBrowse } from "./TagLibraryBrowse";
 import { TagLibraryValues } from "./TagLibraryValues";
 
 const TAGINFO_CONSENT_KEY = "overpass-styler:taginfo-consent";
-const SEARCH_DEBOUNCE_MS = 300;
 
 export interface TagLibraryDrawerProps {
   open: boolean;
@@ -65,8 +64,11 @@ const EMPTY_SELECTION: Selection = { key: null, value: null, curated: null };
 
 export function TagLibraryDrawer({ open, onClose, onInsert }: TagLibraryDrawerProps) {
   const [selection, setSelection] = useState<Selection>(EMPTY_SELECTION);
+  // The header's filter input. Drives the offline "All OSM tags" list in
+  // the left rail; no longer feeds the Values column (which would have
+  // fired a Taginfo /search call and rendered a confusing "no matches"
+  // when the offline list already had the answer).
   const [searchInput, setSearchInput] = useState("");
-  const [searchQ, setSearchQ] = useState<string | null>(null);
 
   // Taginfo confirmation state. ``"granted" | "denied" | null``.
   const [consent, setConsent] = useState<"granted" | "denied" | null>(() => {
@@ -86,7 +88,6 @@ export function TagLibraryDrawer({ open, onClose, onInsert }: TagLibraryDrawerPr
     if (!open) {
       setSelection(EMPTY_SELECTION);
       setSearchInput("");
-      setSearchQ(null);
     }
   }, [open]);
 
@@ -102,17 +103,6 @@ export function TagLibraryDrawer({ open, onClose, onInsert }: TagLibraryDrawerPr
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
-
-  // Debounced search → searchQ. Cleared when input is empty.
-  useEffect(() => {
-    const trimmed = searchInput.trim();
-    if (!trimmed) {
-      setSearchQ(null);
-      return;
-    }
-    const handle = window.setTimeout(() => setSearchQ(trimmed), SEARCH_DEBOUNCE_MS);
-    return () => window.clearTimeout(handle);
-  }, [searchInput]);
 
   // Confirmation gateway. Curated callers can skip it; Taginfo callers MUST
   // await ``requireConfirmation()`` before firing a fetch. Returns ``true``
@@ -154,32 +144,8 @@ export function TagLibraryDrawer({ open, onClose, onInsert }: TagLibraryDrawerPr
     }
   };
 
-  const onSelectKey = (key: string) => {
-    setSelection({ key, value: null, curated: null });
-    // Clear search when the user navigates to a key — search "wins" otherwise.
-    if (searchInput) {
-      setSearchInput("");
-      setSearchQ(null);
-    }
-  };
-
-  const onSelectValue = (key: string, value: string) => {
-    setSelection((prev) =>
-      // Preserve the curated entry only if it matches the new value; otherwise
-      // drop it so the detail panel falls back to whatever the merge endpoint
-      // returns.
-      prev.curated && prev.curated.key === key && prev.curated.value === value
-        ? { key, value, curated: prev.curated }
-        : { key, value, curated: null },
-    );
-  };
-
   const onNavigateRelated = (key: string, value: string) => {
     setSelection({ key, value, curated: null });
-    if (searchInput) {
-      setSearchInput("");
-      setSearchQ(null);
-    }
   };
 
   const handleInsert = (clause: string) => {
@@ -276,7 +242,7 @@ export function TagLibraryDrawer({ open, onClose, onInsert }: TagLibraryDrawerPr
               type="search"
               value={searchInput}
               onChange={(e) => setSearchInput(e.currentTarget.value)}
-              placeholder="Search tags…"
+              placeholder="Filter tags (try: prison, school, amenity=cafe)"
               className={[
                 "w-full rounded-md border border-[var(--color-line)] bg-[var(--color-surface)]",
                 "px-3 py-1.5 text-sm text-[var(--color-ink)]",
@@ -285,7 +251,8 @@ export function TagLibraryDrawer({ open, onClose, onInsert }: TagLibraryDrawerPr
               ].join(" ")}
             />
             <p className="mt-1 text-[10px] text-[var(--color-ink-faint)]">
-              Searches curated entries and OSM Taginfo. Curated results appear first.
+              Filters the bundled OSM tag index live (21k tags, offline).
+              Curated entries above stay visible.
             </p>
           </div>
         </header>
@@ -297,20 +264,18 @@ export function TagLibraryDrawer({ open, onClose, onInsert }: TagLibraryDrawerPr
         >
           <div className="min-h-0 border-r border-[var(--color-line)] bg-[var(--color-surface-sunken)]">
             <TagLibraryBrowse
-              selectedKey={selection.key}
               selectedCuratedId={selection.curated?.id ?? null}
               onSelectCurated={onSelectCurated}
-              onSelectKey={onSelectKey}
-              requireConfirmation={requireConfirmation}
             />
           </div>
           <div className="min-h-0 border-r border-[var(--color-line)] bg-[var(--color-surface-raised)]">
             <TagLibraryValues
+              filterQuery={searchInput}
               selectedKey={selection.key}
-              searchQ={searchQ}
               selectedValue={selection.value}
-              onSelectValue={onSelectValue}
-              requireConfirmation={requireConfirmation}
+              onSelectTag={(key, value) =>
+                setSelection({ key, value, curated: null })
+              }
             />
           </div>
           <div className="min-h-0 bg-[var(--color-surface)]">{detailContent}</div>

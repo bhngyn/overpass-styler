@@ -667,13 +667,24 @@ def test_bake_bbox_query_creates_project_when_id_is_none(
         ]
     }
 
-    async def fake(ql: str, *, timeout: int = 25) -> dict:
+    async def fake(ql: str, **_kw) -> dict:
         return fake_result
 
-    # The bake endpoint uses the projects-router's overpass binding, so patch both
-    # in case the router's been re-imported into a different namespace.
+    async def fake_count(*_a, **_kw) -> int:
+        # Force the single-shot path (below COMPOSE_SINGLE_SHOT_CAP) so the
+        # bake test stays a single mocked call rather than tiling.
+        return 1
+
+    # The bake endpoint uses the projects-router's overpass binding, so patch
+    # both in case the router's been re-imported into a different namespace.
+    # ``execute_count`` is also mocked because the bbox+query bake path now
+    # routes through ``overpass_tile.run_overpass_maybe_tiled`` (so large
+    # bakes get the same count-probe + auto-tiling treatment as the projects
+    # router), which fires a count probe before fetching.
     monkeypatch.setattr(ai.overpass, "execute_query", fake)
     monkeypatch.setattr(projects_module.overpass, "execute_query", fake)
+    monkeypatch.setattr(ai.overpass, "execute_count", fake_count)
+    monkeypatch.setattr(projects_module.overpass, "execute_count", fake_count)
 
     r = client.post(
         "/api/browse/bake",

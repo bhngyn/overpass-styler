@@ -38,6 +38,10 @@ interface Props {
   glossaryEntries: GlossaryEntry[];
   glossaryLoading: boolean;
   glossaryError: string | null;
+  /** Opens the full Tag Library drawer (curated + live Taginfo browsing).
+   *  Threaded down into the SubjectPicker so the "browse all OSM tags"
+   *  affordance is one click away from the curated catalog. */
+  onOpenTagLibrary?: () => void;
 }
 
 const MAX_INLINE_HITS = 6;
@@ -50,6 +54,7 @@ export function QueryBuilder({
   glossaryEntries,
   glossaryLoading,
   glossaryError,
+  onOpenTagLibrary,
 }: Props) {
   const [search, setSearch] = useState("");
   const [searchFocused, setSearchFocused] = useState(false);
@@ -426,6 +431,14 @@ export function QueryBuilder({
         onClose={() => setPickerOpen(false)}
         selectedIds={selectedSubjectIds}
         onToggleSubject={toggleSubject}
+        onOpenTagLibrary={
+          onOpenTagLibrary
+            ? () => {
+                setPickerOpen(false);
+                onOpenTagLibrary();
+              }
+            : undefined
+        }
       />
     </div>
   );

@@ -1,15 +1,34 @@
 /**
  * BboxPicker — region selector with three input modes (Search / Draw / Coords).
  *
- * - Search: hits Nominatim directly (no backend proxy in this stream).
- * - Draw: stubbed for v1; another stream will wire MapLibre's draw control.
+ * The picker is purely a controller: it owns no map. The workspace map
+ * (mounted once by ProjectWorkspace as <MapPreview />) is the drawing
+ * surface for "Draw" mode, and also visualises the committed bbox for
+ * every mode via a persistent overlay. See `lib/workspaceMap.ts` for the
+ * shared registry MapPreview registers itself with.
+ *
+ * - Search: hits Nominatim directly, commits the bbox + flies the
+ *   workspace map to it.
+ * - Draw: arms drag-to-rectangle on the workspace map.
  * - Coords: four small number inputs (W, S, E, N).
  *
  * The bbox tuple is `[west, south, east, north]` to match the backend API.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { TextInput } from "@/components/ui/Field";
+import {
+  startBboxDraw,
+  paintBboxOverlay,
+  clearBboxOverlay,
+  fitBboxOverlay,
+  type BboxDrawHandle,
+} from "@/lib/bboxDraw";
+import {
+  getWorkspaceMap,
+  subscribeWorkspaceMap,
+  setWorkspaceDrawing,
+} from "@/lib/workspaceMap";
 
 export type Bbox = [number, number, number, number]; // [W, S, E, N]
 
@@ -30,6 +49,29 @@ interface NominatimHit {
 export function BboxPicker({ bbox, regionLabel, onChange }: Props) {
   const [mode, setMode] = useState<Mode>("search");
 
+  // Whenever the bbox prop changes, push the rectangle onto the workspace
+  // map as a persistent overlay so the operator can see what they picked
+  // — regardless of which input mode produced it. Clears on null.
+  useEffect(() => {
+    const apply = (map: ReturnType<typeof getWorkspaceMap>) => {
+      if (!map) return;
+      if (bbox) paintBboxOverlay(map, bbox);
+      else clearBboxOverlay(map);
+    };
+    // Subscribe so we re-apply if the workspace map remounts (e.g.
+    // switching workflow steps in and out of Compose).
+    return subscribeWorkspaceMap(apply);
+  }, [bbox?.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Tear down the overlay when the picker unmounts. The bbox is held on
+  // the draft, so this clears the visual only; the next mount will repaint.
+  useEffect(() => {
+    return () => {
+      const map = getWorkspaceMap();
+      if (map) clearBboxOverlay(map);
+    };
+  }, []);
+
   return (
     <div className="space-y-2">
       <SegmentedControl mode={mode} onChange={setMode} />
@@ -40,14 +82,19 @@ export function BboxPicker({ bbox, regionLabel, onChange }: Props) {
             const north = parseFloat(hit.boundingbox[1]);
             const west = parseFloat(hit.boundingbox[2]);
             const east = parseFloat(hit.boundingbox[3]);
-            onChange({
-              bbox: [west, south, east, north],
-              regionLabel: hit.display_name,
-            });
+            const next: Bbox = [west, south, east, north];
+            onChange({ bbox: next, regionLabel: hit.display_name });
+            const map = getWorkspaceMap();
+            if (map) fitBboxOverlay(map, next);
           }}
         />
       )}
-      {mode === "draw" && <DrawModeStub />}
+      {mode === "draw" && (
+        <DrawMode
+          onCommit={(next) => onChange({ bbox: next, regionLabel: null })}
+          hasBbox={bbox != null}
+        />
+      )}
       {mode === "coords" && (
         <CoordsMode
           bbox={bbox}
@@ -173,19 +220,108 @@ function SearchMode({ onPick }: { onPick: (hit: NominatimHit) => void }) {
   );
 }
 
-function DrawModeStub() {
+// ── Draw mode ───────────────────────────────────────────────────────────────
+//
+// Arms the workspace map for a drag-to-draw interaction. The button is the
+// only persistent UI — no inline mini-map. The "Drag · Esc to cancel" hint
+// is rendered as a banner overlay above the workspace map by MapPreview's
+// existing layout (we just style it in-place here for now via the button
+// state). The workspace map captures the actual draw.
+
+function DrawMode({
+  onCommit,
+  hasBbox,
+}: {
+  onCommit: (next: Bbox) => void;
+  hasBbox: boolean;
+}) {
+  const [armed, setArmed] = useState(false);
+  const [mapReady, setMapReady] = useState(() => getWorkspaceMap() != null);
+  const drawHandleRef = useRef<BboxDrawHandle | null>(null);
+
+  useEffect(() => {
+    // Stay in sync with the workspace map's mount lifecycle so the button
+    // disables cleanly if MapPreview hasn't rendered yet (e.g. on the
+    // very first visit to Compose before its sibling map has loaded).
+    return subscribeWorkspaceMap((m) => {
+      setMapReady(m != null);
+      if (!m) {
+        drawHandleRef.current?.dispose();
+        drawHandleRef.current = null;
+        setArmed(false);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      drawHandleRef.current?.dispose();
+      drawHandleRef.current = null;
+    };
+  }, []);
+
+  function startDraw() {
+    const map = getWorkspaceMap();
+    if (!map) return;
+    drawHandleRef.current?.dispose();
+    setArmed(true);
+    setWorkspaceDrawing(true);
+    drawHandleRef.current = startBboxDraw(map, {
+      onCommit: (next) => {
+        setArmed(false);
+        setWorkspaceDrawing(false);
+        drawHandleRef.current = null;
+        onCommit(next);
+        paintBboxOverlay(map, next);
+      },
+      onCancel: () => {
+        setArmed(false);
+        setWorkspaceDrawing(false);
+        drawHandleRef.current = null;
+      },
+    });
+  }
+
+  function cancelDraw() {
+    drawHandleRef.current?.dispose();
+    drawHandleRef.current = null;
+    setArmed(false);
+    setWorkspaceDrawing(false);
+  }
+
   return (
     <div className="space-y-1.5">
-      <Button
-        disabled
-        title="Draw-on-map is coming soon. For now, use Search or Coords."
-        size="sm"
-      >
-        Draw on map
-      </Button>
-      <p className="text-[11px] italic text-[var(--color-ink-faint)]">
-        Coming soon — for now, search a place name or paste coordinates below.
-      </p>
+      <div className="flex items-center gap-1.5">
+        {armed ? (
+          <Button type="button" size="sm" variant="ghost" onClick={cancelDraw}>
+            Cancel
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            size="sm"
+            variant="primary"
+            onClick={startDraw}
+            disabled={!mapReady}
+            title={
+              mapReady
+                ? "Click + drag on the map to draw a rectangle"
+                : "Waiting for the map to load…"
+            }
+          >
+            {hasBbox ? "Redraw rectangle" : "Draw rectangle"}
+          </Button>
+        )}
+        <p className="text-[11px] italic text-[var(--color-ink-faint)]">
+          {!mapReady
+            ? "Loading map…"
+            : armed
+              ? "Click + drag on the map · Esc to cancel."
+              : hasBbox
+                ? "Pan + zoom the map, then redraw."
+                : "Pan + zoom the map to your area, then drag."}
+        </p>
+      </div>
     </div>
   );
 }
@@ -209,7 +345,10 @@ function CoordsMode({
     const N = next.n !== undefined ? next.n : n;
     const nums = [W, S, E, N].map((v) => parseFloat(v));
     if (nums.every((v) => Number.isFinite(v))) {
-      onChange([nums[0], nums[1], nums[2], nums[3]]);
+      const out: Bbox = [nums[0], nums[1], nums[2], nums[3]];
+      onChange(out);
+      const map = getWorkspaceMap();
+      if (map) fitBboxOverlay(map, out);
     } else {
       onChange(null);
     }

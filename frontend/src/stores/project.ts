@@ -1,5 +1,18 @@
 import { create } from "zustand";
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
+
+/** Convert any caught value into a short, actionable user message.
+ *  ``ApiError`` carries the parsed FastAPI ``detail`` and an ``isAbort``
+ *  flag so user-initiated cancellations don't surface as failures. */
+function formatError(e: unknown): string {
+  if (e instanceof ApiError) return e.detail || `HTTP ${e.status}`;
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+function isAbortError(e: unknown): boolean {
+  return e instanceof ApiError && e.isAbort;
+}
 import { defaultFeatureStyle } from "@/lib/defaults";
 import { hexRgbToRgba, opacityToAlpha } from "@/lib/kmlColor";
 import { DEFAULT_THEME_ID, colorAt, themeById, type Theme } from "@/lib/palettes";
@@ -119,7 +132,7 @@ interface Actions {
     query: string;
     bbox: [number, number, number, number] | null;
     regionLabel?: string | null;
-  }) => Promise<number>;
+  }, signal?: AbortSignal) => Promise<number>;
 }
 
 type Store = State & Actions;
@@ -186,7 +199,7 @@ export const useProjectStore = create<Store>((set, get) => ({
       const projects = await api.listProjects();
       set({ projects });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     } finally {
       set({ loadingProjects: false });
     }
@@ -208,18 +221,27 @@ export const useProjectStore = create<Store>((set, get) => ({
     });
     try {
       const proj = await api.getProject(id);
+      // Stale-response guard: if the user switched projects while
+      // ``getProject`` was in flight, drop the response on the floor —
+      // applying it would clobber the new project's state.
+      if (get().currentProjectId !== id) return;
       set({ currentProject: proj, selection: { kind: "none" }, sourceFiles: {} });
       const details = await Promise.all(
         proj.source_files.map((sf) => api.getSourceFile(id, sf.id)),
       );
+      if (get().currentProjectId !== id) return;
       const byId: Record<number, SourceFileDetail> = {};
       for (const d of details) byId[d.id] = d;
       set({ sourceFiles: byId });
       await ensureCategoryColors();
     } catch (e) {
-      set({ error: String(e) });
+      // Don't overwrite a *newer* project's error state with this one's.
+      if (get().currentProjectId !== id) return;
+      set({ error: formatError(e) });
     } finally {
-      set({ busy: false });
+      if (get().currentProjectId === id) {
+        set({ busy: false });
+      }
     }
   },
 
@@ -269,7 +291,7 @@ export const useProjectStore = create<Store>((set, get) => ({
       set({ currentProject: proj });
       await ensureCategoryColors();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     } finally {
       set({ busy: false });
     }
@@ -378,21 +400,27 @@ export const useProjectStore = create<Store>((set, get) => ({
     const ordered = orderedCategoryValues(proj, get().sourceFiles);
     set({ themeId, busy: true });
     try {
-      // Re-colour each category with the theme palette. Fire in parallel; the
-      // last successful response wins for `currentProject`.
-      let latest = proj;
-      const responses = await Promise.all(
+      // Re-colour each category with the theme palette in parallel for
+      // throughput, but don't trust "the last response wins" — that's a
+      // race when responses arrive out-of-order or one fails. Wait for the
+      // whole batch, then reload the canonical project state.
+      await Promise.all(
         ordered.map((value, idx) => {
           const style = styleFromThemeColor(theme, colorAt(theme, idx));
           return api.setCategoryStyle(pid, value, style);
         }),
       );
-      if (responses.length > 0) latest = responses[responses.length - 1];
+      if (get().currentProjectId !== pid) return;
+      const latest = await api.getProject(pid);
+      if (get().currentProjectId !== pid) return;
       set({ currentProject: latest });
     } catch (e) {
-      set({ error: String(e) });
+      if (get().currentProjectId !== pid) return;
+      set({ error: formatError(e) });
     } finally {
-      set({ busy: false });
+      if (get().currentProjectId === pid) {
+        set({ busy: false });
+      }
     }
   },
 
@@ -423,7 +451,7 @@ export const useProjectStore = create<Store>((set, get) => ({
       set({ mode: "project" });
       return result;
     } catch (e) {
-      set({ error: String(e) });
+      if (!isAbortError(e)) set({ error: formatError(e) });
       throw e;
     } finally {
       set({ busy: false });
@@ -435,19 +463,23 @@ export const useProjectStore = create<Store>((set, get) => ({
     set({ workflowStep: step, error: null });
   },
 
-  async runOverpassQuery(body) {
+  async runOverpassQuery(body, signal) {
     const pid = get().currentProjectId;
     if (pid == null) {
       throw new Error("No active project to attach the layer to.");
     }
     set({ busy: true, error: null });
     try {
-      const summary = await api.runOverpassQuery(pid, {
-        name: body.name,
-        query: body.query,
-        bbox: body.bbox,
-        region_label: body.regionLabel ?? null,
-      });
+      const summary = await api.runOverpassQuery(
+        pid,
+        {
+          name: body.name,
+          query: body.query,
+          bbox: body.bbox,
+          region_label: body.regionLabel ?? null,
+        },
+        signal,
+      );
       const detail = await api.getSourceFile(pid, summary.id);
       set((s) => ({ sourceFiles: { ...s.sourceFiles, [summary.id]: detail } }));
       const proj = await api.getProject(pid);
@@ -455,7 +487,8 @@ export const useProjectStore = create<Store>((set, get) => ({
       await ensureCategoryColors();
       return summary.id;
     } catch (e) {
-      set({ error: String(e) });
+      // Abort-initiated errors are user-driven; don't flash a red banner.
+      if (!isAbortError(e)) set({ error: formatError(e) });
       throw e;
     } finally {
       set({ busy: false });

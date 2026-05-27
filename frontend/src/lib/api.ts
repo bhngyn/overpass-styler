@@ -26,14 +26,53 @@ import type {
 
 const BASE = "/api";
 
+/** Thrown for non-2xx responses with the FastAPI ``detail`` extracted into
+ *  ``.detail`` so callers can surface an actionable message instead of the
+ *  full raw body. ``isAbort`` distinguishes user-initiated cancellation
+ *  from a real failure so UI code doesn't show a "request failed" toast
+ *  when the operator just clicked Cancel. */
+export class ApiError extends Error {
+  status: number;
+  detail: string;
+  isAbort: boolean;
+  constructor(status: number, detail: string, isAbort = false) {
+    super(detail || `HTTP ${status}`);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+    this.isAbort = isAbort;
+  }
+}
+
+function extractDetail(body: string): string {
+  // FastAPI default error shape is ``{"detail": "..."}``; surface that, but
+  // also tolerate plain-text bodies so a misconfigured proxy doesn't drop
+  // the whole error.
+  try {
+    const parsed = JSON.parse(body) as { detail?: unknown };
+    if (typeof parsed.detail === "string") return parsed.detail;
+  } catch {
+    // not JSON, fall through
+  }
+  return body.trim();
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-    ...init,
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(`${BASE}${path}`, {
+      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+      ...init,
+    });
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") {
+      throw new ApiError(0, "request cancelled", true);
+    }
+    throw new ApiError(0, err instanceof Error ? err.message : String(err));
+  }
   if (!resp.ok) {
     const body = await resp.text();
-    throw new Error(`${resp.status} ${resp.statusText}: ${body}`);
+    throw new ApiError(resp.status, extractDetail(body) || resp.statusText);
   }
   if (resp.status === 204) return undefined as T;
   return resp.json() as Promise<T>;
@@ -132,7 +171,8 @@ export const api = {
   // ── Phase B1 (overpass queries) ─────────────────────────────────────────
   // Compose-step bake: takes user-authored Overpass QL, the runner substitutes
   // {{bbox}} server-side and ingests the result as a new SourceFile byte-
-  // identical to one created from an uploaded KML.
+  // identical to one created from an uploaded KML. Pass ``signal`` to wire
+  // up an AbortController so the operator can cancel a long bake.
   runOverpassQuery: (
     projectId: number,
     body: {
@@ -141,10 +181,12 @@ export const api = {
       bbox: [number, number, number, number] | null;
       region_label?: string | null;
     },
+    signal?: AbortSignal,
   ) =>
     request<SourceFileSummary>(`/projects/${projectId}/overpass-queries`, {
       method: "POST",
       body: JSON.stringify(body),
+      signal,
     }),
 
   // ── Phase B3 (tag library) ──────────────────────────────────────────────
@@ -171,10 +213,11 @@ export const api = {
   // drill-in list; ``item`` is full per-feature detail; ``bake`` is the
   // handoff back into the project workflow.
   browse: {
-    inventory: (bbox: BrowseBbox) =>
+    inventory: (bbox: BrowseBbox, signal?: AbortSignal) =>
       request<BrowseInventoryResponse>("/browse/inventory", {
         method: "POST",
         body: JSON.stringify({ bbox }),
+        signal,
       }),
     items: (bbox: BrowseBbox, key: string, value: string, offset = 0, limit = 200) => {
       const q = new URLSearchParams({
@@ -188,27 +231,30 @@ export const api = {
     },
     item: (osmId: string) =>
       request<BrowseFeatureDetail>(`/browse/item?osm_id=${encodeURIComponent(osmId)}`),
-    bake: (body: BrowseBakeRequest) =>
+    bake: (body: BrowseBakeRequest, signal?: AbortSignal) =>
       request<BrowseBakeResponse>("/browse/bake", {
         method: "POST",
         body: JSON.stringify(body),
+        signal,
       }),
 
     // ── Phase L2 (large-query support) ──
     // Preflight runs a cheap "count + area" check; the result steers the
     // UI between single-shot, adaptive-tiled, or refuse-with-reason paths.
-    preflight: (bbox: BrowseBbox) =>
+    preflight: (bbox: BrowseBbox, signal?: AbortSignal) =>
       request<BrowsePreflightResponse>("/browse/preflight", {
         method: "POST",
         body: JSON.stringify({ bbox }),
+        signal,
       }),
     // Tiled inventory aggregates results across an L1-provided tile grid.
     // The response carries the same shape as `/inventory` plus a partial
     // flag + per-tile failure list so the UI can degrade gracefully.
-    inventoryTiled: (tiles: BrowseBbox[]) =>
+    inventoryTiled: (tiles: BrowseBbox[], signal?: AbortSignal) =>
       request<BrowseTiledInventoryResponse>("/browse/inventory-tiled", {
         method: "POST",
         body: JSON.stringify({ tiles }),
+        signal,
       }),
   },
 
@@ -219,9 +265,10 @@ export const api = {
   runOverpassQueryPreflight: (
     projectId: number,
     body: { query: string; bbox: [number, number, number, number] | null },
+    signal?: AbortSignal,
   ) =>
     request<OverpassQueryPreflightResponse>(
       `/projects/${projectId}/overpass-queries/preflight`,
-      { method: "POST", body: JSON.stringify(body) },
+      { method: "POST", body: JSON.stringify(body), signal },
     ),
 };

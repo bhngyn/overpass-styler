@@ -15,6 +15,20 @@ from lxml import etree
 KML_NS = "http://www.opengis.net/kml/2.2"
 NSMAP = {"k": KML_NS}
 
+
+# Investigator-supplied KMLs are untrusted input. lxml's default parser
+# resolves external entities and DTDs, which opens the door to XXE
+# (file: schemes, billion-laughs amplification, SSRF via http: entities).
+# The KML format doesn't legitimately use any of that, so we lock it down.
+def _make_safe_parser() -> etree.XMLParser:
+    return etree.XMLParser(
+        resolve_entities=False,
+        no_network=True,
+        load_dtd=False,
+        dtd_validation=False,
+        huge_tree=False,
+    )
+
 GeometryKind = Literal["Point", "LineString", "Polygon"]
 
 
@@ -73,7 +87,15 @@ class ParsedKml:
 
 
 def _local(tag: str) -> str:
-    """Strip namespace from an lxml tag."""
+    """Strip namespace from an lxml tag.
+
+    Returns ``""`` for anything that isn't a string tag — under
+    ``resolve_entities=False`` lxml emits ``Entity`` / ``ProcessingInstruction``
+    nodes during ``iter()`` whose ``tag`` attribute is a callable, not a
+    string. We don't want to surface those into the parsed model.
+    """
+    if not isinstance(tag, str):
+        return ""
     return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
 
@@ -140,13 +162,14 @@ def _parse_geometry(elem: etree._Element) -> Geometry | None:
 
 def parse_kml(source: str | bytes) -> ParsedKml:
     """Parse a KML document. `source` may be a path or raw bytes/str content."""
+    parser = _make_safe_parser()
     if isinstance(source, str) and "<" not in source[:200]:
-        tree = etree.parse(source)
+        tree = etree.parse(source, parser=parser)
         root = tree.getroot()
     else:
         if isinstance(source, str):
             source = source.encode("utf-8")
-        root = etree.fromstring(source)
+        root = etree.fromstring(source, parser=parser)
 
     document = root.find("k:Document", NSMAP)
     if document is None:

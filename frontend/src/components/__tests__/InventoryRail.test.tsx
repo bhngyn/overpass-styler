@@ -38,14 +38,20 @@ function makeInventory(overrides: Partial<BrowseInventoryResponse> = {}): Browse
           { key: "amenity", value: "prison", count: 6 },
           { key: "amenity", value: "school", count: 4 },
         ],
+        tags: [
+          { key: "amenity", value: "prison", count: 6 },
+          { key: "amenity", value: "school", count: 4 },
+        ],
       },
       {
         name: "Buildings",
         count: 22,
         top_tags: [{ key: "building", value: "yes", count: 18 }],
+        tags: [{ key: "building", value: "yes", count: 18 }],
       },
     ],
     domain_counts: null,
+    centers: [],
     ...overrides,
   };
 }
@@ -61,6 +67,8 @@ describe("InventoryRail", () => {
         inventoryFetchedAt={null}
         hoveredOsmId={null}
         selectedOsmId={null}
+        drill={null}
+        onDrillChange={() => {}}
         onHoverItem={() => {}}
         onSelectItem={() => {}}
         onRefetch={() => {}}
@@ -79,6 +87,8 @@ describe("InventoryRail", () => {
         inventoryFetchedAt={Date.now()}
         hoveredOsmId={null}
         selectedOsmId={null}
+        drill={null}
+        onDrillChange={() => {}}
         onHoverItem={() => {}}
         onSelectItem={() => {}}
         onRefetch={() => {}}
@@ -107,6 +117,8 @@ describe("InventoryRail", () => {
         inventoryFetchedAt={Date.now()}
         hoveredOsmId={null}
         selectedOsmId={null}
+        drill={null}
+        onDrillChange={() => {}}
         onHoverItem={() => {}}
         onSelectItem={() => {}}
         onRefetch={() => {}}
@@ -127,6 +139,8 @@ describe("InventoryRail", () => {
         inventoryFetchedAt={Date.now()}
         hoveredOsmId={null}
         selectedOsmId={null}
+        drill={null}
+        onDrillChange={() => {}}
         onHoverItem={() => {}}
         onSelectItem={() => {}}
         onRefetch={() => {}}
@@ -149,6 +163,8 @@ describe("InventoryRail", () => {
         inventoryFetchedAt={Date.now()}
         hoveredOsmId={null}
         selectedOsmId={null}
+        drill={null}
+        onDrillChange={() => {}}
         onHoverItem={() => {}}
         onSelectItem={() => {}}
         onRefetch={onRefetch}

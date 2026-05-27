@@ -164,7 +164,7 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
     }
   }
 
-  async function handleAddAsLayer() {
+  async function handleAddAsLayer(signal?: AbortSignal) {
     if (!selectedDraft) return;
     setAddingDraftId(selectedDraft.id);
     setError(null);
@@ -179,7 +179,7 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
         query: selectedDraft.query,
         bbox: selectedDraft.bbox,
         regionLabel: selectedDraft.regionLabel,
-      });
+      }, signal);
       // Drop the draft now that it's baked.
       setDrafts((s) => {
         const next = { ...s };
@@ -364,11 +364,12 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
               }}
               onPreflight={
                 currentProject
-                  ? (query, bbox) =>
-                      api.runOverpassQueryPreflight(currentProject.id, {
-                        query,
-                        bbox,
-                      })
+                  ? (query, bbox, signal) =>
+                      api.runOverpassQueryPreflight(
+                        currentProject.id,
+                        { query, bbox },
+                        signal,
+                      )
                   : undefined
               }
               glossaryEntries={glossary}

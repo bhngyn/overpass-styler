@@ -6,7 +6,7 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
@@ -25,6 +25,41 @@ def _db_url() -> str:
 
 
 _engine = create_engine(_db_url(), echo=False, future=True)
+
+
+@event.listens_for(_engine, "connect")
+def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+    """Apply SQLite tuning on every new connection.
+
+    * ``journal_mode = WAL`` — readers don't block on the writer (and vice
+      versa). The default rollback journal serialises every read/write,
+      which causes user-visible stalls when Browse inventory and Compose
+      ingest race.
+    * ``synchronous = NORMAL`` — fsyncs at WAL-checkpoint time rather than
+      every commit. Safe with WAL; an order-of-magnitude faster on writes.
+    * ``busy_timeout = 5000`` — when a write briefly blocks (checkpoint,
+      another process), wait instead of returning ``SQLITE_BUSY``.
+    * ``foreign_keys = ON`` — SQLite defaults to off; we want cascade
+      deletes for ``Project`` → ``SourceFile`` → ``Placemark*`` to fire.
+    """
+    # Only apply to sqlite — using SQLAlchemy with another backend (tests
+    # via in-memory, future Postgres) shouldn't get these pragmas.
+    try:
+        dialect = _engine.dialect.name
+    except Exception:
+        dialect = ""
+    if dialect != "sqlite":
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode = WAL;")
+        cursor.execute("PRAGMA synchronous = NORMAL;")
+        cursor.execute("PRAGMA busy_timeout = 5000;")
+        cursor.execute("PRAGMA foreign_keys = ON;")
+    finally:
+        cursor.close()
+
+
 SessionLocal = sessionmaker(bind=_engine, expire_on_commit=False, class_=Session)
 
 

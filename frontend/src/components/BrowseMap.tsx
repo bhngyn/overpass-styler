@@ -30,6 +30,7 @@ import {
 import maplibregl from "maplibre-gl";
 import type { Map as MapLibreMap, StyleSpecification } from "maplibre-gl";
 import type { BrowseBbox, BrowseItemSummary } from "@/lib/types";
+import { startBboxDraw, type BboxDrawHandle } from "@/lib/bboxDraw";
 
 type Basemap = "streets" | "satellite" | "osm" | "minimal";
 
@@ -126,6 +127,13 @@ export interface BrowseMapHandle {
   /** Fly the map to a bbox without setting it as the "selected" bbox
    * (used by the search-to-place flow before the user commits). */
   flyToBbox: (bbox: BrowseBbox) => void;
+  /** Enter "drag-to-draw-rectangle" mode. Resolves the commited bbox via
+   *  `onCommit`. Returns a dispose handle so the caller can cancel from
+   *  the outside (e.g. when the user clicks the toggle off). */
+  startDraw: (opts: {
+    onCommit: (bbox: BrowseBbox) => void;
+    onCancel?: () => void;
+  }) => BboxDrawHandle;
 }
 
 /** Tile-grid overlay descriptor. Set when the parent's preflight decided
@@ -149,10 +157,15 @@ interface Props {
   selectedOsmId: string | null;
   onFeatureClick: (osmId: string) => void;
   tileGrid?: TileGridState | null;
+  /** Drives the in-map "Querying Overpass…" pill and the pulsing bbox
+   * outline. The tile-grid overlay has its own progress affordance, so
+   * this indicator only renders when a single-strategy fetch is the one
+   * keeping the operator waiting. */
+  inventoryLoading?: boolean;
 }
 
 export const BrowseMap = forwardRef<BrowseMapHandle, Props>(function BrowseMap(
-  { bbox, items, hoveredOsmId, selectedOsmId, onFeatureClick, tileGrid },
+  { bbox, items, hoveredOsmId, selectedOsmId, onFeatureClick, tileGrid, inventoryLoading },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -188,6 +201,18 @@ export const BrowseMap = forwardRef<BrowseMapHandle, Props>(function BrowseMap(
       } catch {
         /* ignore — invalid bbox */
       }
+    },
+    startDraw: ({ onCommit, onCancel }) => {
+      const map = mapRef.current;
+      if (!map) {
+        // Map not ready — return a no-op handle so the caller can still
+        // safely .dispose().
+        return { dispose: () => {} };
+      }
+      return startBboxDraw(map, {
+        onCommit: (b) => onCommit([b[0], b[1], b[2], b[3]]),
+        onCancel,
+      });
     },
   }));
 
@@ -659,6 +684,46 @@ export const BrowseMap = forwardRef<BrowseMapHandle, Props>(function BrowseMap(
     src.setData({ type: "FeatureCollection", features });
   }, [tileGrid, layersReady]);
 
+  // Pulse the bbox outline while an inventory fetch is in flight. Without
+  // this the small-bbox / single-strategy case looks frozen — the tile-grid
+  // overlay only renders for the tiled path, so a quiet 0.1 km² query gives
+  // the operator no visible signal that work is happening. We tween the
+  // outline's line-opacity on a 1.2s sine cycle; cleanup restores 1.0 so a
+  // late dispose doesn't leave the rectangle dimmed.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !layersReady) return;
+    if (!inventoryLoading || !bbox) {
+      try {
+        map.setPaintProperty(LAYER_IDS.bboxOutline, "line-opacity", 1);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    let raf = 0;
+    const start = performance.now();
+    const tick = (now: number) => {
+      const t = ((now - start) / 1200) * Math.PI * 2;
+      const opacity = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(t));
+      try {
+        map.setPaintProperty(LAYER_IDS.bboxOutline, "line-opacity", opacity);
+      } catch {
+        /* ignore */
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(raf);
+      try {
+        map.setPaintProperty(LAYER_IDS.bboxOutline, "line-opacity", 1);
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [inventoryLoading, bbox, layersReady]);
+
   // Basemap toggle.
   useEffect(() => {
     const map = mapRef.current;
@@ -684,6 +749,32 @@ export const BrowseMap = forwardRef<BrowseMapHandle, Props>(function BrowseMap(
         ref={containerRef}
         style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
       />
+      {/* Single-strategy loading pill — covers the case the tile-grid
+          legend below doesn't: a small bbox that goes through the legacy
+          /inventory path. Indeterminate sweep because the backend gives
+          us no progress signal here. Hidden once tileGrid takes over so
+          we don't double-render. */}
+      {inventoryLoading && !tileGrid && bbox && (
+        <div className="pointer-events-none absolute bottom-7 left-3 rounded-md border border-[var(--color-line)] bg-white/95 px-3 py-2 text-[11px] shadow-sm">
+          <div className="flex items-center gap-2">
+            <div className="text-[9px] uppercase tracking-[0.18em] text-[var(--color-ink-faint)]">
+              Querying Overpass
+            </div>
+            <div className="flex gap-0.5" aria-hidden="true">
+              <span className="loading-dot inline-block h-1 w-1 rounded-full bg-[var(--color-accent)]" />
+              <span className="loading-dot inline-block h-1 w-1 rounded-full bg-[var(--color-accent)]" />
+              <span className="loading-dot inline-block h-1 w-1 rounded-full bg-[var(--color-accent)]" />
+            </div>
+          </div>
+          <div className="mt-1 font-[var(--font-mono)] text-[var(--color-ink-soft)]">
+            10–30s for a fresh bbox
+          </div>
+          <div className="mt-1.5 h-1 w-32 overflow-hidden rounded-full bg-[var(--color-line)]">
+            <div className="indeterminate-sweep rounded-full bg-[var(--color-accent)]" />
+          </div>
+        </div>
+      )}
+
       {/* Tile-grid legend — only shown while a tiled fetch is in flight.
           We hide it once loadedTiles === totalTiles to declutter the map
           when the rail itself takes over showing results. */}

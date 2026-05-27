@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import re
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -19,7 +22,7 @@ from app.db.models import (
     SourceFile,
 )
 from app.db.session import get_session
-from app.enrichment import overpass
+from app.enrichment import overpass, overpass_tile
 from app.kml.category import detect_category_key
 from app.kml.from_overpass import DEFAULT_MAX_ELEMENTS, synthesize_kml
 from app.kml.parse import parse_kml
@@ -42,7 +45,27 @@ from .schemas import (
     UpdateProjectRequest,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+
+def _bbox_area_km2(bbox: list[float] | None) -> float | None:
+    """Approximate area of a [W, S, E, N] bbox in km².
+
+    Uses a simple equirectangular approximation — accurate to within a few
+    percent for the bbox sizes investigators draw (≤ continent-scale). The
+    Overpass adaptive-timeout consumer only needs the order of magnitude.
+    """
+    if bbox is None or len(bbox) != 4:
+        return None
+    west, south, east, north = bbox
+    if east <= west or north <= south:
+        return None
+    mean_lat_rad = math.radians((south + north) / 2.0)
+    width_km = (east - west) * 111.320 * math.cos(mean_lat_rad)
+    height_km = (north - south) * 110.574
+    return max(0.0, width_km * height_km)
 
 
 def _safe_style_id(category_value: str) -> str:
@@ -254,20 +277,65 @@ def _ingest_kml_bytes(
     return _source_file_summary(sf)
 
 
+# 100 MB ceiling on KML uploads — Earth Pro itself stutters on KMLs much
+# bigger than this, and uncapped reads invite an OOM via a malicious or
+# accidental huge file. Override per-deployment via env var.
+_MAX_KML_UPLOAD_BYTES = int(
+    os.environ.get("OVERPASS_STYLER_MAX_KML_BYTES", str(100 * 1024 * 1024))
+)
+
+
+async def _read_upload_capped(file: UploadFile, *, max_bytes: int) -> bytes:
+    """Stream ``file`` into memory in 1 MiB chunks, refusing past ``max_bytes``.
+
+    Raises ``HTTPException(413)`` rather than allowing an unbounded ``read``
+    to exhaust the worker's memory. The ceiling is checked after each chunk
+    so a single oversized chunk can't slip through.
+    """
+    buf = bytearray()
+    while True:
+        chunk = await file.read(1 << 20)  # 1 MiB
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"KML upload exceeds the {max_bytes // 1024 // 1024} MB cap. "
+                    "Set OVERPASS_STYLER_MAX_KML_BYTES higher if you trust the source."
+                ),
+            )
+    return bytes(buf)
+
+
 @router.post("/{project_id}/source-files", response_model=SourceFileSummary, status_code=201)
 async def import_kml(
     project_id: int,
     file: UploadFile = File(...),
     session: Session = Depends(get_session),
 ) -> SourceFileSummary:
-    proj = _load_project(session, project_id)
-    raw = await file.read()
-    return _ingest_kml_bytes(
-        session,
-        proj,
-        file.filename or "import.kml",
-        raw,
-    )
+    # Read the body before touching the DB so we don't hold a SQLite writer
+    # lock across the await.
+    raw = await _read_upload_capped(file, max_bytes=_MAX_KML_UPLOAD_BYTES)
+
+    # Run the sync DB work on the threadpool. Two concurrent uploads to the
+    # same project previously deadlocked: B's blocking ``session.execute``
+    # (waiting on A's writer lock) ran on the event loop thread, so A's
+    # coroutine couldn't resume to commit, and B then exhausted its 5s
+    # ``busy_timeout``. Pushing the sync work to a worker thread lets the
+    # event loop schedule A's commit while B sits in pysqlite's busy_wait,
+    # so B picks up the lock as soon as A releases it.
+    def _do_ingest() -> SourceFileSummary:
+        proj = _load_project(session, project_id)
+        return _ingest_kml_bytes(
+            session,
+            proj,
+            file.filename or "import.kml",
+            raw,
+        )
+
+    return await run_in_threadpool(_do_ingest)
 
 
 def _check_finite_bbox(v: list[float] | None) -> list[float] | None:
@@ -336,6 +404,9 @@ class OverpassPreflightResponse(BaseModel):
     estimated_kml_bytes: int
     too_large: bool
     hard_cap: int
+    # Hostname of the Overpass mirror that served this probe, only when it
+    # isn't the primary endpoint. Same semantics as ``SourceFileSummary.served_by``.
+    served_by: str | None = None
 
 
 _BBOX_PLACEHOLDER_RE = re.compile(r"\{\{\s*bbox\s*\}\}")
@@ -358,8 +429,12 @@ def _substitute_bbox(query: str, bbox: list[float] | None) -> str:
 
 # Strip a leading ``[out:...][timeout:...];`` settings line + any trailing
 # ``out body;`` / ``out geom;`` / etc. so execute_count can wrap a clean body.
+# The trailing-out regex makes args optional so the bare ``out;`` idiom
+# (most common Overpass Turbo export shape) is stripped too — without
+# ``(?:\s+[^;]*)?`` execute_count would wrap ``(...;out;);out count;`` which
+# Overpass rejects with a parse error.
 _LEADING_SETTINGS_RE = re.compile(r"^\s*(?:\[[^\]]+\]\s*)+;")
-_TRAILING_OUT_RE = re.compile(r"\bout\s+[^;]*;\s*$", re.IGNORECASE)
+_TRAILING_OUT_RE = re.compile(r"\bout(?:\s+[^;]*)?;\s*$", re.IGNORECASE)
 
 
 def _strip_outer_statements(ql: str) -> str:
@@ -401,9 +476,21 @@ async def preflight_overpass_query(
     substituted = _substitute_bbox(req.query, req.bbox)
     body = _strip_outer_statements(substituted)
 
+    served_by: str | None = None
     try:
-        total = await overpass.execute_count(body)
+        # Use the contextvar-based ex wrapper so the preflight can also tell
+        # the UI when the primary mirror was down — investigators see the
+        # "routed via …" footnote even before they bake.
+        token = overpass._served_by_ctx.set(None)
+        try:
+            total = await overpass.execute_count(body)
+            served_url = overpass._served_by_ctx.get()
+            if served_url:
+                served_by = overpass.served_by_label(served_url)
+        finally:
+            overpass._served_by_ctx.reset(token)
     except overpass.OverpassError as exc:
+        logger.warning("overpass preflight failed: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     # Rough KML size estimate: each placemark serialises to ~150-300 bytes
@@ -416,6 +503,7 @@ async def preflight_overpass_query(
         estimated_kml_bytes=estimated_bytes,
         too_large=total > DEFAULT_MAX_ELEMENTS,
         hard_cap=DEFAULT_MAX_ELEMENTS,
+        served_by=served_by,
     )
 
 
@@ -443,9 +531,25 @@ async def run_overpass_query(
     proj = _load_project(session, project_id)
 
     substituted = _substitute_bbox(req.query, req.bbox)
+    served_by: str | None = None
     try:
-        result = await overpass.execute_query(substituted)
+        if req.bbox and "{{bbox}}" in req.query:
+            # Bbox-anchored query: route through the auto-tiling helper, which
+            # probes the count and either single-shots, tiles in parallel
+            # across the mirror pool, or refuses if past the hard cap.
+            area_km2 = _bbox_area_km2(req.bbox)
+            result, served_by = await overpass_tile.run_overpass_maybe_tiled(
+                req.query, req.bbox, area_hint_km2=area_km2
+            )
+        else:
+            # Free-form query (no bbox placeholder, e.g. area_name lookups):
+            # fall through to a single-shot. The mirror pool still gives us
+            # failover.
+            data, url = await overpass.execute_query_ex(substituted)
+            result = data
+            served_by = overpass.served_by_label(url)
     except overpass.OverpassError as exc:
+        logger.exception("overpass query failed: %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     raw_kml, report = synthesize_kml(req.name, result)
@@ -466,6 +570,7 @@ async def run_overpass_query(
             ingested=report.ingested,
             truncated=report.total - report.ingested,
         )
+    summary.served_by = served_by
     return summary
 
 

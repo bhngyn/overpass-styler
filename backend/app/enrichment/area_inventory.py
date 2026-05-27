@@ -69,6 +69,16 @@ def _validate_osm_token(name: str, token: str) -> None:
 # snapshot of OSM is fine for almost every workflow.
 _CACHE_TTL_SECONDS = 24 * 3600
 
+# Per-bbox cap on the number of feature centers returned with the area
+# summary. The map renders centers as muted dots and switches to clustering
+# above CLUSTER_THRESHOLD (200 on the frontend), so the cap is about
+# payload size and MapLibre cluster-index build time rather than render
+# fidelity. 5000 dots is ~150KB of JSON, well within budget; above that we
+# truncate and the operator drills in per-domain (the items endpoint is
+# already paginated). Tiled aggregation enforces this cap globally — see
+# the comment in post_inventory_tiled for the per-tile share-out.
+INVENTORY_CENTER_CAP = 5000
+
 # Default area cap for the summary endpoint. 200 km² is roughly a small city /
 # a single Khartoum-sized district — large enough for most "what's in this
 # neighbourhood" reconnaissance, small enough that Overpass returns in well
@@ -95,6 +105,59 @@ DOMAINS: tuple[tuple[str, str], ...] = (
 )
 _DOMAIN_KEYS: tuple[str, ...] = tuple(k for _, k in DOMAINS)
 OTHER_DOMAIN = "Other"
+
+# Per-domain cap on the number of distinct (key, value) tag pairs returned
+# in the inventory's full tag breakdown. The rail's drill view filters
+# this list client-side, so the bound is about payload size, not
+# usability. 200 is comfortably below the natural ceiling for canonical
+# domains (most OSM keys have ≤ 100 well-known values) and high enough
+# for "Other" — which can be tag-soup — to remain useful without
+# dominating the response.
+DOMAIN_TAG_CAP = 200
+
+# OSM keys that describe a *specific* feature (identifiers, freeform text,
+# per-feature numeric properties) rather than classifying it into a
+# reusable category. Skipped when building the "available tags" breakdown
+# for the Other bucket — listing every distinct name=Foo or addr:housename=42
+# would bury the actually-reusable tags like place=town or shop=bakery.
+# Canonical domains (Amenities, Buildings, …) don't use this list because
+# they only tally the canonical key, which is by definition categorical.
+_IDENTIFIER_KEYS: frozenset[str] = frozenset({
+    "name", "ref", "source", "wikidata", "wikipedia",
+    "note", "fixme", "description",
+    "email", "phone", "website", "url",
+    "image", "mapillary", "panoramax",
+    "opening_hours", "start_date", "check_date", "survey:date",
+    "height", "ele", "maxspeed", "population",
+    "operator",  # often unique per feature ("Ministry of X")
+})
+_IDENTIFIER_PREFIXES: tuple[str, ...] = (
+    "name:", "addr:", "contact:", "wikipedia:", "wikidata:",
+    "description:", "ref:", "source:", "note:",
+)
+
+
+def _is_identifier_key(key: str) -> bool:
+    if key in _IDENTIFIER_KEYS:
+        return True
+    return any(key.startswith(p) for p in _IDENTIFIER_PREFIXES)
+
+
+def _is_categorical_value(value: object) -> bool:
+    """Decide whether ``value`` looks like a reusable category label.
+
+    Categorical values are short, single-line strings. Long values are
+    almost always freeform text (descriptions, addresses, opening_hours
+    expressions) that won't recur across features and would only bloat
+    the tag-breakdown list.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    if len(value) > 64:
+        return False
+    if "\n" in value or "\r" in value:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -254,17 +317,88 @@ def _element_geometry_kind(element: dict[str, Any]) -> str:
     return "Unknown"
 
 
+def _collect_centers(
+    elements: list[dict[str, Any]],
+    *,
+    cap: int = INVENTORY_CENTER_CAP,
+) -> list[dict[str, Any]]:
+    """Pull representative ``[lon, lat]`` per element for the Browse map.
+
+    Returns up to ``cap`` rows, each ``{osm_id, lon, lat, domain}``. Elements
+    without a usable center (relations with no ``out center`` decoration, or
+    nodes missing coordinates) are silently skipped — they'll still appear
+    in the per-domain counts; the operator can drill in to inspect them.
+    Order is preserved so the truncation, when it happens, falls on the
+    tail of whatever Overpass returned (typically lower-id objects).
+    """
+    out: list[dict[str, Any]] = []
+    for el in elements:
+        if len(out) >= cap:
+            break
+        center = _element_center(el)
+        if center is None:
+            continue
+        kind = el.get("type")
+        oid = el.get("id")
+        if not kind or oid is None:
+            continue
+        domain, _key, _value = _domain_for_tags(el.get("tags") or {})
+        out.append({
+            "osm_id": f"{kind}/{oid}",
+            "lon": center[0],
+            "lat": center[1],
+            "domain": domain,
+        })
+    return out
+
+
 def _build_domain_summary(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Partition elements into domains and emit per-domain summary rows.
 
-    Each row: ``{name, count, top_tags: [{key, value, count}, ...]}`` with
-    ``top_tags`` sorted by frequency desc, limited to 5 entries.
+    Each row: ``{name, count, top_tags, tags}`` where:
+
+    * ``count`` is the number of elements landing in this domain.
+    * ``tags`` is the full (key, value) breakdown sorted by frequency desc,
+      capped at :data:`DOMAIN_TAG_CAP`. For the 8 canonical domains this
+      lists every distinct value of the canonical key (e.g. all
+      ``amenity=*`` values seen). For ``Other`` — which has no canonical
+      key — this is every distinct categorical tag pair across the bucket's
+      features, with identifier-ish keys (``name``, ``addr:*``, etc.)
+      filtered out so the list stays browsable.
+    * ``top_tags`` is ``tags[:5]`` — kept as its own field so the rail's
+      domain card chip-rail can stay declarative and avoid slicing in JS.
+
+    The point of this breakdown is reconnaissance: "what tags exist in
+    this bbox?" The cap exists only to keep payload bounded; the frontend
+    drill view ships a filter input so even a 200-row list is usable.
     """
-    buckets: dict[str, list[tuple[str | None, str | None]]] = defaultdict(list)
+    domain_elements: dict[str, int] = defaultdict(int)
+    domain_tags: dict[str, Counter[tuple[str, str]]] = defaultdict(Counter)
+
     for el in elements:
         tags = el.get("tags") or {}
-        domain, key, value = _domain_for_tags(tags)
-        buckets[domain].append((key, value))
+        domain, primary_key, primary_value = _domain_for_tags(tags)
+        domain_elements[domain] += 1
+        if primary_key and primary_value:
+            # Canonical domain: count only the canonical key. Secondary
+            # tags on the same feature (like wheelchair=yes on an
+            # amenity=restaurant) are deliberately excluded — the user's
+            # "what amenities are here?" question is answered by amenity=*
+            # values, not by every tag that happens to co-occur.
+            domain_tags[domain][(primary_key, primary_value)] += 1
+        else:
+            # Other bucket: no canonical key, so tally every categorical
+            # tag pair present. Filtered to skip identifier-ish keys so
+            # the list reflects feature *types* (place=town, shop=bakery)
+            # rather than per-feature noise (name=Foo, addr:street=Bar).
+            for k, v in tags.items():
+                if not isinstance(k, str) or not k:
+                    continue
+                if _is_identifier_key(k):
+                    continue
+                if not _is_categorical_value(v):
+                    continue
+                domain_tags[domain][(k, v)] += 1
 
     out: list[dict[str, Any]] = []
     # Emit in the canonical DOMAINS order, then Other, so the frontend can
@@ -272,20 +406,20 @@ def _build_domain_summary(elements: list[dict[str, Any]]) -> list[dict[str, Any]
     # populated.
     ordered_names = [name for name, _ in DOMAINS] + [OTHER_DOMAIN]
     for name in ordered_names:
-        items = buckets.get(name) or []
-        if not items:
+        count = domain_elements.get(name, 0)
+        if count == 0:
             continue
-        # Tally (key,value) frequencies; skip entries with no recognised key
-        # (the Other bucket).
-        tally: Counter[tuple[str, str]] = Counter()
-        for k, v in items:
-            if k and v:
-                tally[(k, v)] += 1
-        top_tags = [
+        tally = domain_tags.get(name) or Counter()
+        full_tags = [
             {"key": k, "value": v, "count": c}
-            for (k, v), c in tally.most_common(5)
+            for (k, v), c in tally.most_common(DOMAIN_TAG_CAP)
         ]
-        out.append({"name": name, "count": len(items), "top_tags": top_tags})
+        out.append({
+            "name": name,
+            "count": count,
+            "top_tags": full_tags[:5],
+            "tags": full_tags,
+        })
     return out
 
 
@@ -354,6 +488,7 @@ async def fetch_area_summary(
     data = await overpass.execute_query(ql, timeout=_QUERY_TIMEOUT)
     elements = data.get("elements") or []
     domains = _build_domain_summary(elements)
+    centers = _collect_centers(elements)
     result = {
         "area_capped": False,
         "area_km2": area_km2,
@@ -363,6 +498,7 @@ async def fetch_area_summary(
             "total_count": len(elements),
         },
         "domains": domains,
+        "centers": centers,
         "total_count": len(elements),
     }
     _cache_write(cache_path, result)

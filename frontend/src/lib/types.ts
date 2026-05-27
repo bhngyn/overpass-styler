@@ -68,6 +68,10 @@ export interface SourceFileSummary {
   /** Set when this SourceFile was created from a query that exceeded the
    * synthesizer cap. Imported KMLs always have `null` here. */
   truncation?: TruncationReport | null;
+  /** Hostname of the Overpass mirror that served this layer, only set
+   * when failover routed the request away from the primary endpoint.
+   * The UI shows a muted "routed via …" footnote when present. */
+  served_by?: string | null;
 }
 
 export interface SourceFileDetail {
@@ -132,12 +136,31 @@ export interface BrowseDomainTopTag {
 export interface BrowseDomainSummary {
   name: string;
   count: number;
+  /** First 5 entries from `tags`, kept as its own field so the domain
+   * card's chip rail stays declarative. */
   top_tags: BrowseDomainTopTag[];
+  /** Full categorical-tag breakdown for this domain, sorted by count
+   * desc, capped at DOMAIN_TAG_CAP (200) on the backend. Drives the
+   * TagBreakdownView the rail shows when the operator drills into a
+   * domain card — answers "what tags actually exist in this bbox?" */
+  tags: BrowseDomainTopTag[];
 }
 
 export interface BrowseInventorySummary {
   bbox: BrowseBbox;
   total_count: number;
+}
+
+/** Per-feature marker for the Browse map. Returned only when the inventory
+ * isn't area-capped (capped responses come from a tags-only Overpass query
+ * with no `out center;`, so positions aren't available). The backend caps
+ * the list at INVENTORY_CENTER_CAP (5000) so the payload stays bounded;
+ * the map clusters above 200 to keep render budget under control. */
+export interface BrowseCenter {
+  osm_id: string;
+  lon: number;
+  lat: number;
+  domain: string;
 }
 
 /** `area_capped` toggles which of `domains` / `domain_counts` is populated.
@@ -151,6 +174,7 @@ export interface BrowseInventoryResponse {
   summary: BrowseInventorySummary | null;
   domains: BrowseDomainSummary[] | null;
   domain_counts: Record<string, number> | null;
+  centers: BrowseCenter[];
 }
 
 export interface BrowseItemSummary {
@@ -242,4 +266,7 @@ export interface OverpassQueryPreflightResponse {
   estimated_kml_bytes: number;
   too_large: boolean;
   hard_cap: number;
+  /** Hostname of the Overpass mirror that served the probe, only when
+   * failover routed the request off the primary endpoint. */
+  served_by?: string | null;
 }

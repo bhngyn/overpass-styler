@@ -76,9 +76,39 @@
   animation: wobble-compass 3.6s ease-in-out infinite;
   transform-origin: 50% 50%;
 }
+
+/* Indeterminate progress sweep — used by Browse-mode loading pills while a
+   single-strategy Overpass query is in flight. A 35%-wide segment slides
+   from off-left to off-right on a 1.6s loop, giving constant motion without
+   pretending to know how far along we are. */
+@keyframes indeterminate-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(285%); }
+}
+.indeterminate-sweep {
+  width: 35%;
+  height: 100%;
+  animation: indeterminate-sweep 1.6s ease-in-out infinite;
+}
+
+/* Loading dots — three dots that fade in/out in sequence. Sits inline
+   next to a "Querying…" label so a reader's eye can latch onto motion
+   even before the bar registers. */
+@keyframes loading-dot {
+  0%, 80%, 100% { opacity: 0.25; }
+  40%           { opacity: 1; }
+}
+.loading-dot {
+  animation: loading-dot 1.2s ease-in-out infinite;
+}
+.loading-dot:nth-child(2) { animation-delay: 0.15s; }
+.loading-dot:nth-child(3) { animation-delay: 0.3s; }
+
 /* Respect users who'd rather not see motion. */
 @media (prefers-reduced-motion: reduce) {
   .compass-wobble { animation: none; }
+  .indeterminate-sweep { animation: none; width: 100%; opacity: 0.6; }
+  .loading-dot { animation: none; opacity: 0.6; }
 }
 
 html, body, #root {

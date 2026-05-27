@@ -357,17 +357,19 @@ function WorkspaceBody({
   onOpenTagLibrary: () => void;
 }) {
   if (step === "compose") {
-    // ComposeStep paints its own 280px layer-stack rail + 1fr query editor.
-    // The map gets the same 400px-ish footprint as the right rail in the
-    // other steps — wider than the previous 380px hardcode so it can show
-    // meaningful context, and consistent with Review / Export so the map
-    // never visually "jumps" between steps.
+    // Compose is map-first: investigators are picking a region and previewing
+    // an Overpass result, so the map is the priority surface. ComposeStep
+    // paints its own 280px layer-stack rail + the query column; together they
+    // take a fixed ~740px and the map fills everything else. This means the
+    // map does visually grow when crossing into Compose from Style/Review/
+    // Export (400px right rail there) — accepted, since Compose's job is
+    // different from the other steps.
     return (
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div className="flex min-h-0 min-w-0 flex-1">
+        <div className="flex min-h-0 w-[720px] shrink-0">
           <ComposeStep onOpenTagLibrary={onOpenTagLibrary} />
         </div>
-        <aside className="relative min-h-0 w-[420px] shrink-0 border-l border-[var(--color-line)] bg-[#eae6dc]">
+        <aside className="relative min-h-0 min-w-0 flex-1 border-l border-[var(--color-line)] bg-[#eae6dc]">
           <MapPreview />
         </aside>
       </div>

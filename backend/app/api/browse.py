@@ -25,8 +25,10 @@ integrator wires it in once all parallel A-phase agents have landed.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+from collections import defaultdict
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -34,14 +36,15 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.api.projects import (
+    _bbox_area_km2,
     _ingest_kml_bytes,
     _load_project,
     _substitute_bbox,
 )
-from app.api.schemas import SourceFileSummary
+from app.api.schemas import SourceFileSummary, TruncationReportSchema
 from app.db.models import Project
 from app.db.session import get_session
-from app.enrichment import area_inventory, overpass
+from app.enrichment import area_inventory, overpass, overpass_tile, tiling
 from app.kml.from_overpass import synthesize_kml
 
 logger = logging.getLogger(__name__)
@@ -71,6 +74,15 @@ PREFLIGHT_TINY_AREA_KM2 = 1.0
 PREFLIGHT_TARGET_TILE_COUNT = 3000
 PREFLIGHT_MAX_TILE_DIM = 12  # 12x12 = 144 tiles ≈ 2.5min at 1 req/sec
 TILED_INVENTORY_TIMEOUT_S = 90
+# Per-tile area cap for the inventory-tiled path. Larger than
+# DEFAULT_AREA_CAP_KM2 because the caller has already split a large bbox
+# into ≤3000-feature chunks via preflight; we trust those chunks to be
+# fetchable with geometry/centers (out tags center) even at ~1000 km².
+# Without this bump tiles silently degrade into the counts-only path,
+# returning domain counts but empty top_tags — drill-ins then open onto
+# "No features in this scope". Set conservatively: a 6266 km² source
+# bbox tiles to ~700 km²/tile at 3×3, which fits comfortably under 1500.
+TILED_AREA_CAP_KM2 = 1500.0
 
 
 # ---------------------------------------------------------------------------
@@ -114,14 +126,43 @@ class DomainTopTag(BaseModel):
 
 
 class DomainSummary(BaseModel):
+    """One domain's slice of an inventory response.
+
+    ``top_tags`` is the first 5 of ``tags`` — kept separate so the rail's
+    domain-card chip rail can read it directly without slicing. ``tags``
+    is the full categorical-tag breakdown for this domain, capped at
+    :data:`area_inventory.DOMAIN_TAG_CAP` and sorted by count desc. The
+    rail's drill view exposes it with a filter input so the operator can
+    answer "what tags actually exist in this area?" without scanning a
+    spreadsheet by eye.
+    """
+
     name: str
     count: int
     top_tags: list[DomainTopTag] = Field(default_factory=list)
+    tags: list[DomainTopTag] = Field(default_factory=list)
 
 
 class InventorySummary(BaseModel):
     bbox: list[float]
     total_count: int
+
+
+class CenterPoint(BaseModel):
+    """Lightweight per-feature marker for the Browse map.
+
+    Returned in non-area-capped responses so the map can render every
+    fetched feature as a muted dot (clustered above ~200 on the frontend
+    for render budget). ``domain`` is the same partition label used in the
+    inventory rail, so we can colour-code later without re-classifying on
+    the client. Geometry is intentionally one ``[lon, lat]`` per feature —
+    full geometry comes from :http:get:`/api/browse/item` on click.
+    """
+
+    osm_id: str
+    lon: float
+    lat: float
+    domain: str
 
 
 class InventoryResponse(BaseModel):
@@ -130,6 +171,9 @@ class InventoryResponse(BaseModel):
     ``area_capped`` is True when the bbox exceeded the size cap and Overpass
     was queried for counts only. In that mode ``domain_counts`` is populated
     and ``domains`` is omitted; in the normal mode it's the other way round.
+    ``centers`` is populated only when not area-capped — the counts-only
+    query path doesn't ask Overpass for ``out center;``, so positions are
+    unavailable.
     """
 
     area_capped: bool
@@ -139,6 +183,7 @@ class InventoryResponse(BaseModel):
     summary: InventorySummary | None = None
     domains: list[DomainSummary] | None = None
     domain_counts: dict[str, int] | None = None
+    centers: list[CenterPoint] = Field(default_factory=list)
 
 
 class ItemSummary(BaseModel):
@@ -247,11 +292,14 @@ class TiledInventoryResponse(BaseModel):
 
     Same domain-summary shape as :class:`InventoryResponse` but always
     populated (no area-cap path) and decorated with ``partial`` / ``failed_tiles``
-    so the UI can warn the investigator if any tile failed.
+    so the UI can warn the investigator if any tile failed. ``centers`` is
+    aggregated across all tiles up to the same INVENTORY_CENTER_CAP cap, so
+    payload size stays bounded regardless of how many tiles contribute.
     """
 
     total_count: int
     domains: list[DomainSummary]
+    centers: list[CenterPoint] = Field(default_factory=list)
     tile_count: int
     partial: bool
     failed_tiles: list[list[float]] = Field(default_factory=list)
@@ -281,30 +329,11 @@ def _plan_tile_grid(
     target_per_tile: int = PREFLIGHT_TARGET_TILE_COUNT,
     max_dim: int = PREFLIGHT_MAX_TILE_DIM,
 ) -> tuple[TileGrid, list[list[float]]]:
-    """Subdivide ``bbox`` into an NxN grid sized for ``target_per_tile`` features.
-
-    We use ``ceil(sqrt(count / target))`` as the divisor and cap at
-    ``max_dim`` so the worst-case wait stays under ~2.5 minutes at the
-    1 req/sec rate-limit floor. Grids are square to keep the math simple and
-    the resulting tiles roughly equal in area; non-square aspect ratios from
-    the source bbox carry through unchanged.
-    """
-    if total_count <= 0:
-        dim = 1
-    else:
-        ideal = math.sqrt(total_count / target_per_tile)
-        dim = max(1, min(max_dim, math.ceil(ideal)))
-    west, south, east, north = bbox
-    dx = (east - west) / dim
-    dy = (north - south) / dim
-    tiles: list[list[float]] = []
-    for r in range(dim):
-        for c in range(dim):
-            w = west + c * dx
-            e = west + (c + 1) * dx if c < dim - 1 else east
-            s = south + r * dy
-            n = south + (r + 1) * dy if r < dim - 1 else north
-            tiles.append([w, s, e, n])
+    """Wrap the shared :func:`app.enrichment.tiling.plan_tile_bboxes` for the
+    preflight response schema (which carries an explicit ``TileGrid``)."""
+    dim, tiles = tiling.plan_tile_bboxes(
+        bbox, total_count, target_per_tile=target_per_tile, max_dim=max_dim
+    )
     return TileGrid(rows=dim, cols=dim), tiles
 
 
@@ -328,6 +357,10 @@ def _domain_summary_to_schema(d: dict) -> DomainSummary:
         top_tags=[
             DomainTopTag(key=t["key"], value=t["value"], count=int(t["count"]))
             for t in d.get("top_tags") or []
+        ],
+        tags=[
+            DomainTopTag(key=t["key"], value=t["value"], count=int(t["count"]))
+            for t in d.get("tags") or []
         ],
     )
 
@@ -399,6 +432,7 @@ async def post_preflight(req: _BBox) -> PreflightResponse:
     try:
         total = await overpass.execute_count(ql_body, area_hint_km2=area_km2)
     except overpass.OverpassError as exc:
+        logger.warning("browse overpass call failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Overpass call failed: {exc}") from exc
 
     if total > PREFLIGHT_REFUSE_COUNT:
@@ -429,14 +463,36 @@ async def post_preflight(req: _BBox) -> PreflightResponse:
     )
 
 
+async def _fetch_tile_safe(
+    tile: list[float],
+) -> tuple[list[float], dict | None, BaseException | None]:
+    """Fetch a single tile, returning either the result or the exception.
+
+    Wrapping this way lets us run multiple tiles concurrently via
+    ``asyncio.gather`` without aborting the whole batch when one fails.
+    """
+    bbox_t = _bbox_tuple(tile)
+    try:
+        result = await area_inventory.fetch_area_summary(
+            bbox_t,
+            area_cap_km2=TILED_AREA_CAP_KM2,
+        )
+        return list(tile), result, None
+    except overpass.OverpassError as exc:
+        return list(tile), None, exc
+    except Exception as exc:  # noqa: BLE001 — defensive: never let one tile abort the batch
+        return list(tile), None, exc
+
+
 @router.post("/inventory-tiled", response_model=TiledInventoryResponse)
 async def post_inventory_tiled(req: TiledInventoryRequest) -> TiledInventoryResponse:
     """Fetch + aggregate area summaries for a list of tiles.
 
-    Iterates serially (the rate-limit lock would serialise concurrent calls
-    anyway, and serial control flow makes failure-handling readable). If
-    any tile errors we log it, mark ``partial=true``, and return what we
-    have — partial reconnaissance is more useful than nothing.
+    Tiles are fetched in chunks of ``len(overpass_pool)`` so multiple mirrors
+    run in parallel. Each mirror has its own 1 req/sec rate-limit lock, so
+    we never violate the public-instance etiquette. If any tile errors we
+    log it, mark ``partial=true``, and return what we have — partial
+    reconnaissance is more useful than nothing.
 
     Domain counts are summed across tiles; top tags are merged by
     ``(key, value)`` with counts added so the same prison appearing in two
@@ -444,80 +500,99 @@ async def post_inventory_tiled(req: TiledInventoryRequest) -> TiledInventoryResp
     """
     failed_tiles: list[list[float]] = []
     domain_counts: dict[str, int] = {}
-    top_tag_counter: dict[tuple[str, str], dict[str, int | str]] = {}
+    # Per-domain (key, value) → summed count. Replaces the old top-5-only
+    # merge so we can rebuild a full ``tags`` list per domain on the way
+    # out, not just a chip rail's worth.
+    tag_counter: dict[str, dict[tuple[str, str], int]] = defaultdict(dict)
     # Track per-domain order of first appearance to keep the response stable.
     domain_order: list[str] = []
     total_count = 0
+    centers: list[CenterPoint] = []
+    seen_center_ids: set[str] = set()
 
-    for tile in req.tiles:
-        bbox_t = _bbox_tuple(tile)
-        try:
-            # Use the underlying summary fetcher with a generous cap so tiles
-            # are never silently degraded to counts-only mode. The caller
-            # already split the area into ~3000-feature chunks via preflight;
-            # an individual tile should comfortably stay under the cap.
-            result = await area_inventory.fetch_area_summary(
-                bbox_t,
-                area_cap_km2=area_inventory.DEFAULT_AREA_CAP_KM2,
-            )
-        except overpass.OverpassError as exc:
-            logger.warning("tiled-inventory tile failed: %s — %s", tile, exc)
-            failed_tiles.append(list(tile))
-            continue
-        except Exception as exc:  # noqa: BLE001 — defensive: never let one tile abort the batch
-            logger.exception("tiled-inventory tile raised: %s — %s", tile, exc)
-            failed_tiles.append(list(tile))
-            continue
+    parallelism = max(1, len(overpass.endpoint_pool_snapshot()))
+    tiles = list(req.tiles)
+    for chunk_start in range(0, len(tiles), parallelism):
+        chunk = tiles[chunk_start : chunk_start + parallelism]
+        chunk_results = await asyncio.gather(
+            *(_fetch_tile_safe(tile) for tile in chunk)
+        )
+        for tile, result, exc in chunk_results:
+            if exc is not None:
+                if isinstance(exc, overpass.OverpassError):
+                    logger.warning("tiled-inventory tile failed: %s — %s", tile, exc)
+                else:
+                    logger.exception(
+                        "tiled-inventory tile raised: %s — %s", tile, exc
+                    )
+                failed_tiles.append(list(tile))
+                continue
+            assert result is not None  # mypy hint
 
-        total_count += int(result.get("total_count") or 0)
-        if result.get("area_capped"):
-            # The tile slipped over the cap somehow (skewed aspect ratio,
-            # ultra-dense urban core). Aggregate domain_counts but skip
-            # top-tag merging.
-            for name, count in (result.get("domain_counts") or {}).items():
+            total_count += int(result.get("total_count") or 0)
+            if result.get("area_capped"):
+                # The tile slipped over the cap somehow (skewed aspect ratio,
+                # ultra-dense urban core). Aggregate domain_counts but skip
+                # top-tag merging. Centers are unavailable on this path — the
+                # counts-only Overpass query doesn't ask for ``out center;``.
+                for name, count in (result.get("domain_counts") or {}).items():
+                    if name not in domain_counts:
+                        domain_order.append(name)
+                    domain_counts[name] = domain_counts.get(name, 0) + int(count)
+                continue
+
+            for domain in result.get("domains") or []:
+                name = domain.get("name")
+                if not isinstance(name, str):
+                    continue
                 if name not in domain_counts:
                     domain_order.append(name)
-                domain_counts[name] = domain_counts.get(name, 0) + int(count)
-            continue
+                domain_counts[name] = domain_counts.get(name, 0) + int(domain.get("count") or 0)
+                # Merge the full per-tile tag breakdown (not just top_tags).
+                # Per-tile tags is already capped at DOMAIN_TAG_CAP so this is
+                # bounded; we re-cap on the way out after summing.
+                per_domain = tag_counter[name]
+                for tag in domain.get("tags") or domain.get("top_tags") or []:
+                    key = str(tag.get("key", ""))
+                    value = str(tag.get("value", ""))
+                    if not key or not value:
+                        continue
+                    count = int(tag.get("count") or 0)
+                    per_domain[(key, value)] = per_domain.get((key, value), 0) + count
 
-        for domain in result.get("domains") or []:
-            name = domain.get("name")
-            if not isinstance(name, str):
-                continue
-            if name not in domain_counts:
-                domain_order.append(name)
-            domain_counts[name] = domain_counts.get(name, 0) + int(domain.get("count") or 0)
-            for tag in domain.get("top_tags") or []:
-                key = str(tag.get("key", ""))
-                value = str(tag.get("value", ""))
-                if not key or not value:
-                    continue
-                count = int(tag.get("count") or 0)
-                entry = top_tag_counter.setdefault(
-                    (key, value),
-                    {"key": key, "value": value, "count": 0, "domain": name},
-                )
-                entry["count"] = int(entry["count"]) + count
+            if len(centers) < area_inventory.INVENTORY_CENTER_CAP:
+                for c in result.get("centers") or []:
+                    oid = c.get("osm_id")
+                    if not oid or oid in seen_center_ids:
+                        continue
+                    seen_center_ids.add(oid)
+                    centers.append(CenterPoint(
+                        osm_id=str(oid),
+                        lon=float(c["lon"]),
+                        lat=float(c["lat"]),
+                        domain=str(c.get("domain", "Other")),
+                    ))
+                    if len(centers) >= area_inventory.INVENTORY_CENTER_CAP:
+                        break
 
-    # Group top tags by domain so the response shape mirrors the single-bbox
-    # inventory endpoint. Sort each domain's tags by count desc and keep
-    # the top 5 to match the existing UI contract.
-    tags_by_domain: dict[str, list[dict[str, int | str]]] = {}
-    for entry in top_tag_counter.values():
-        d = str(entry["domain"])
-        tags_by_domain.setdefault(d, []).append(entry)
-    for d in tags_by_domain:
-        tags_by_domain[d].sort(key=lambda e: int(e["count"]), reverse=True)
-        tags_by_domain[d] = tags_by_domain[d][:5]
+    # Assemble per-domain tag lists: sort by summed count desc, re-cap at
+    # DOMAIN_TAG_CAP, then split into top_tags (first 5, drives the chip
+    # rail on each domain card) and tags (the full list, drives the
+    # drill-in tag-breakdown view).
+    domain_tag_lists: dict[str, list[DomainTopTag]] = {}
+    for name, per_domain in tag_counter.items():
+        sorted_pairs = sorted(per_domain.items(), key=lambda kv: kv[1], reverse=True)
+        capped = sorted_pairs[: area_inventory.DOMAIN_TAG_CAP]
+        domain_tag_lists[name] = [
+            DomainTopTag(key=k, value=v, count=c) for (k, v), c in capped
+        ]
 
     domains = [
         DomainSummary(
             name=name,
             count=domain_counts[name],
-            top_tags=[
-                DomainTopTag(key=str(e["key"]), value=str(e["value"]), count=int(e["count"]))
-                for e in tags_by_domain.get(name, [])
-            ],
+            top_tags=domain_tag_lists.get(name, [])[:5],
+            tags=domain_tag_lists.get(name, []),
         )
         for name in domain_order
         if domain_counts.get(name, 0) > 0
@@ -526,6 +601,7 @@ async def post_inventory_tiled(req: TiledInventoryRequest) -> TiledInventoryResp
     return TiledInventoryResponse(
         total_count=total_count,
         domains=domains,
+        centers=centers,
         tile_count=len(req.tiles),
         partial=bool(failed_tiles),
         failed_tiles=failed_tiles,
@@ -543,6 +619,7 @@ async def post_inventory(req: _BBox) -> InventoryResponse:
     try:
         result = await area_inventory.fetch_area_summary(bbox)
     except overpass.OverpassError as exc:
+        logger.warning("browse overpass call failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Overpass call failed: {exc}") from exc
 
     if result.get("area_capped"):
@@ -564,6 +641,7 @@ async def post_inventory(req: _BBox) -> InventoryResponse:
             total_count=int(result["summary"]["total_count"]),
         ),
         domains=[_domain_summary_to_schema(d) for d in result.get("domains") or []],
+        centers=[CenterPoint(**c) for c in result.get("centers") or []],
     )
 
 
@@ -586,6 +664,7 @@ async def get_items(
         # an injection attempt. 400 with the offending token surfaced.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except overpass.OverpassError as exc:
+        logger.warning("browse overpass call failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Overpass call failed: {exc}") from exc
     return ItemsResponse(
         items=[ItemSummary(**it) for it in result["items"]],
@@ -605,6 +684,7 @@ async def get_item(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except overpass.OverpassError as exc:
+        logger.warning("browse overpass call failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Overpass call failed: {exc}") from exc
 
     geom_payload = result.get("geometry") or {}
@@ -655,6 +735,7 @@ async def post_bake(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except overpass.OverpassError as exc:
+            logger.warning("browse overpass call failed: %s", exc)
             raise HTTPException(status_code=502, detail=f"Overpass call failed: {exc}") from exc
 
         element = feature.get("raw")
@@ -674,17 +755,33 @@ async def post_bake(
         )
         return BakeResponse(project_id=proj.id, source_file=summary)
 
-    # bbox + query mode. We re-use the projects router's bbox-substitution
-    # helper so the two endpoints behave identically (placeholder syntax,
-    # WSEN→SWNE conversion, error shape).
+    # bbox + query mode. Route through the auto-tiling helper just like
+    # projects.run_overpass_query does — otherwise a large-area bake (a
+    # whole city of features) either times out on a single mirror call or
+    # silently drops everything past synthesize_kml's hard cap. We also
+    # surface the truncation report and the serving mirror so the rail
+    # banner can warn the operator that data was dropped or that we
+    # failed over to a backup endpoint.
     layer_name = req.name or f"bbox-{date.today().isoformat()}"
-    substituted = _substitute_bbox(req.query or "", req.bbox)
+    # Validated by the field validator already; assert for typing.
+    assert req.bbox is not None and req.query is not None
+    served_by: str | None = None
     try:
-        result = await overpass.execute_query(substituted)
+        if "{{bbox}}" in req.query:
+            area_km2 = _bbox_area_km2(req.bbox)
+            result, served_by = await overpass_tile.run_overpass_maybe_tiled(
+                req.query, req.bbox, area_hint_km2=area_km2
+            )
+        else:
+            substituted = _substitute_bbox(req.query, req.bbox)
+            data, url = await overpass.execute_query_ex(substituted)
+            result = data
+            served_by = overpass.served_by_label(url)
     except overpass.OverpassError as exc:
+        logger.warning("browse overpass call failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Overpass call failed: {exc}") from exc
 
-    raw_kml, _truncation = synthesize_kml(layer_name, result)
+    raw_kml, report = synthesize_kml(layer_name, result)
     filename = f"{layer_name}.overpass.kml"
     summary = _ingest_kml_bytes(
         db,
@@ -694,4 +791,11 @@ async def post_bake(
         overpass_query=req.query,
         bbox=req.bbox,
     )
+    if report.truncated:
+        summary.truncation = TruncationReportSchema(
+            total=report.total,
+            ingested=report.ingested,
+            truncated=report.total - report.ingested,
+        )
+    summary.served_by = served_by
     return BakeResponse(project_id=proj.id, source_file=summary)

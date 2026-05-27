@@ -77,7 +77,9 @@ def patched_overpass(
     fake_overpass_result: dict,
     captured_query: dict,
 ):
-    async def fake_execute_query(ql: str, *, timeout: int = 25) -> dict:
+    async def fake_execute_query(
+        ql: str, *, timeout: int | None = 25, **_: object
+    ) -> dict:
         captured_query["ql"] = ql
         captured_query["timeout"] = timeout
         return fake_overpass_result
@@ -193,7 +195,7 @@ def test_upstream_overpass_error_becomes_502(
     from app.api import projects as projects_module
     from app.enrichment.overpass import OverpassError
 
-    async def boom(ql: str, *, timeout: int = 25) -> dict:
+    async def boom(ql: str, **_: object) -> dict:
         raise OverpassError("rate-limited: try later")
 
     monkeypatch.setattr(projects_module.overpass, "execute_query", boom)
@@ -348,12 +350,16 @@ def test_overpass_endpoint_surfaces_truncation(
     monkeypatch.setattr(projects_module.overpass, "execute_query", fake_query)
 
     pid = _make_project(client)
+    # No ``{{bbox}}`` placeholder — that path bypasses the tiling helper's
+    # pre-fetch refuse-above-cap check and goes single-shot, so the
+    # synthesizer is the one that hits its element cap and produces a
+    # truncation report. The auto-tiling path is exercised in
+    # test_overpass_tile.py.
     r = client.post(
         f"/api/projects/{pid}/overpass-queries",
         json={
             "name": "too-many",
-            "query": "nwr({{bbox}});out;",
-            "bbox": [14.0, 11.0, 16.0, 13.0],
+            "query": "nwr(11.0,14.0,13.0,16.0);out;",
         },
     )
     assert r.status_code == 201, r.text

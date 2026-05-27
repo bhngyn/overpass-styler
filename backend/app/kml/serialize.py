@@ -34,7 +34,7 @@ from .atrocity_icons import data_uri_for as _atrocity_data_uri
 from .balloon import DEFAULT_OSM_TAG_KEYS, render_balloon
 from .color import rgba_to_kml
 from .hr_icons import data_uri_for as _hr_data_uri
-from .parse import KML_NS, ParsedKml, Placemark
+from .parse import KML_NS, ParsedKml, Placemark, _make_safe_parser
 from .style import FeatureStyle
 
 # Default investigator annotation fields surfaced in the Evidence section of
@@ -286,7 +286,10 @@ def serialize(doc: StyledDocument) -> bytes:
     )
 
     # Self-check: re-parse what we just emitted so we never hand back broken XML.
-    reparsed = etree.fromstring(body)
+    # Same hardened parser as ``parse_kml`` — the output is our own, so XXE
+    # isn't a real risk here, but we share one parser policy across the
+    # codebase to avoid surprises if something else feeds the self-check.
+    reparsed = etree.fromstring(body, parser=_make_safe_parser())
     # Every <Style> we emitted must have a BalloonStyle/text with non-empty
     # content. CDATA round-trip bugs would silently lose the HTML template.
     for style_el in reparsed.findall(f".//{{{KML_NS}}}Style"):

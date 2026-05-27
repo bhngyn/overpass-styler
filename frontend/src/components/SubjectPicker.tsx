@@ -22,6 +22,13 @@ interface Props {
   onClose: () => void;
   selectedIds: string[];
   onToggleSubject: (subjectId: string) => void;
+  /** When provided, surfaces a "Browse all OSM tags" affordance that closes
+   *  this picker and opens the full Tag Library drawer (curated + live
+   *  Taginfo browsing). The Tag Library is the only place an investigator
+   *  can drill into the long tail of OSM keys that aren't in the curated
+   *  catalog — the language inside this drawer used to point users at
+   *  "the search box back in the editor", but a direct link is plainer. */
+  onOpenTagLibrary?: () => void;
 }
 
 export function SubjectPicker({
@@ -29,6 +36,7 @@ export function SubjectPicker({
   onClose,
   selectedIds,
   onToggleSubject,
+  onOpenTagLibrary,
 }: Props) {
   useEffect(() => {
     if (!open) return;
@@ -83,10 +91,30 @@ export function SubjectPicker({
                 Browse the subject catalog
               </h2>
               <p className="mt-1 text-[11px] text-[var(--color-ink-soft)]">
-                Tap a tile to add or remove. To find specific tags ({" "}
-                <code className="font-[var(--font-mono)]">amenity=bench</code>,{" "}
-                <code className="font-[var(--font-mono)]">cctv</code>, …) use
-                the search box back in the editor — it covers every OSM tag.
+                Tap a tile to add or remove. Looking for something specific
+                like{" "}
+                <code className="font-[var(--font-mono)]">amenity=bench</code>{" "}
+                or{" "}
+                <code className="font-[var(--font-mono)]">cctv</code>?
+                {onOpenTagLibrary ? (
+                  <>
+                    {" "}
+                    <button
+                      type="button"
+                      onClick={onOpenTagLibrary}
+                      className="font-medium text-[var(--color-accent)] underline-offset-2 hover:underline"
+                    >
+                      Browse all OSM tags
+                    </button>
+                    .
+                  </>
+                ) : (
+                  <>
+                    {" "}
+                    Use the Tag Library back in the editor — it covers every
+                    OSM tag.
+                  </>
+                )}
               </p>
             </div>
             <button
@@ -134,6 +162,36 @@ export function SubjectPicker({
               </div>
             );
           })}
+
+          {onOpenTagLibrary && (
+            <div className="mt-8 border-t border-[var(--color-line)] pt-5">
+              <SectionEyebrow>Not finding what you need?</SectionEyebrow>
+              <button
+                type="button"
+                onClick={onOpenTagLibrary}
+                className="group flex w-full items-center justify-between rounded-md border border-dashed border-[var(--color-line)] bg-[var(--color-surface-raised)] px-4 py-3 text-left transition-colors hover:border-[var(--color-accent)] hover:bg-[var(--color-surface)]"
+              >
+                <div>
+                  <div
+                    className="text-[13px] text-[var(--color-ink)]"
+                    style={{ fontWeight: 500 }}
+                  >
+                    Browse all OSM tags
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-[var(--color-ink-soft)]">
+                    Open the Tag Library to drill into every key on OpenStreetMap
+                    via Taginfo.
+                  </div>
+                </div>
+                <span
+                  aria-hidden
+                  className="text-[var(--color-ink-faint)] transition-colors group-hover:text-[var(--color-accent)]"
+                >
+                  →
+                </span>
+              </button>
+            </div>
+          )}
         </div>
       </aside>
     </>

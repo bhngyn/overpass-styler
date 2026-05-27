@@ -29,7 +29,8 @@ import type {
   BrowsePreflightResponse,
 } from "@/lib/types";
 import { BrowseMap, type BrowseMapHandle } from "./BrowseMap";
-import { InventoryRail } from "./InventoryRail";
+import type { BboxDrawHandle } from "@/lib/bboxDraw";
+import { InventoryRail, type DrillScope } from "./InventoryRail";
 import { FeatureDetail, type BakeHandoffPrefill } from "./FeatureDetail";
 import { BakeHandoffModal } from "./BakeHandoffModal";
 
@@ -55,6 +56,10 @@ export function BrowseMode() {
   const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null);
   const [hoveredFeatureId, setHoveredFeatureId] = useState<string | null>(null);
   const [bakeOpen, setBakeOpen] = useState<{ prefill: BakeHandoffPrefill } | null>(null);
+  // Drill state is owned here (not inside InventoryRail) so the map can
+  // react — narrow centers to the active domain when an investigator
+  // clicks a category card, drop back to the full set on Back.
+  const [drill, setDrill] = useState<DrillScope | null>(null);
 
   // ── L2 preflight + tiled-inventory orchestration ──────────────────────────
   //
@@ -91,6 +96,31 @@ export function BrowseMode() {
     "granted" | "denied" | null
   >(() => readConsent("browse-overpass"));
 
+  // Fetch-generation guard. Each fetchInventory call bumps the counter and
+  // captures its own value; every state update first checks "am I still the
+  // latest generation?" before applying. This deduplicates React StrictMode's
+  // double-mount (which otherwise fires two parallel preflight + tiled
+  // inventory calls, doubles the Overpass load, and leaves the progress
+  // overlay stuck at totalTiles-1 because the older call's interval keeps
+  // ticking after the newer one's success path completed). Also covers the
+  // "operator clicks Refetch while the prior fetch is still in flight" case.
+  const fetchGenRef = useRef(0);
+  // AbortController for the in-flight inventory pipeline (preflight + tiled
+  // or single fetch). The fetchGen guard above prevents stale state from
+  // landing; this guard aborts the *network* so a slow Overpass call can
+  // be cancelled from the UI without waiting for the server.
+  const fetchAbortRef = useRef<AbortController | null>(null);
+
+  function cancelInventory() {
+    fetchAbortRef.current?.abort();
+    fetchAbortRef.current = null;
+    // Bumping the generation guarantees any late state updates from the
+    // (now aborted) call are dropped.
+    fetchGenRef.current += 1;
+    setInventoryLoading(false);
+    setTileGrid(null);
+  }
+
   // Fetch inventory whenever bbox changes. Clears selection so the rail
   // returns to the domain-cards view for the new area.
   //
@@ -99,6 +129,20 @@ export function BrowseMode() {
   //   - "tiled"  → render a tile-grid overlay, then api.browse.inventoryTiled.
   //   - "refuse" → no fetch; surface the backend's reason string.
   async function fetchInventory(forBbox: BrowseBbox) {
+    // Cancel any previous in-flight fetch (network + state) before starting
+    // a new one. Each fetch owns its own AbortController.
+    fetchAbortRef.current?.abort();
+    const controller = new AbortController();
+    fetchAbortRef.current = controller;
+    const signal = controller.signal;
+    const myGen = ++fetchGenRef.current;
+    const stillCurrent = () => fetchGenRef.current === myGen && !signal.aborted;
+    const isAbort = (e: unknown) =>
+      typeof e === "object" &&
+      e !== null &&
+      "isAbort" in e &&
+      (e as { isAbort?: boolean }).isAbort === true;
+
     setInventoryLoading(true);
     setInventoryError(null);
     setSelectedFeatureId(null);
@@ -108,22 +152,26 @@ export function BrowseMode() {
 
     let pre: BrowsePreflightResponse;
     try {
-      pre = await api.browse.preflight(forBbox);
+      pre = await api.browse.preflight(forBbox, signal);
     } catch (e) {
+      if (!stillCurrent() || isAbort(e)) return;
       // Preflight failed — most likely an unsupported / offline backend.
       // Fall back to the legacy direct call so the UI still works against
       // pre-L2 deployments.
       try {
-        const result = await api.browse.inventory(forBbox);
+        const result = await api.browse.inventory(forBbox, signal);
+        if (!stillCurrent()) return;
         setInventory(result);
         setInventoryFetchedAt(Date.now());
       } catch (e2) {
+        if (!stillCurrent() || isAbort(e2)) return;
         setInventoryError(String(e2 ?? e));
       } finally {
-        setInventoryLoading(false);
+        if (stillCurrent()) setInventoryLoading(false);
       }
       return;
     }
+    if (!stillCurrent()) return;
     setPreflight(pre);
 
     if (pre.strategy === "refuse") {
@@ -144,55 +192,70 @@ export function BrowseMode() {
         loadedTiles: 0,
         totalTiles,
       });
-      try {
-        // No SSE on the wire yet — we await the aggregated response. The
-        // tile-grid overlay shows the operator that work is happening; we
-        // optimistically tick the progress bar over the expected wall-time
-        // budget so the UI doesn't feel frozen.
-        //
-        // Wall-time estimate: Overpass rate-limits us to ~1 req/sec, so a
-        // 36-tile fetch takes ~40s on the slow path. We tick once per
-        // second up to (totalTiles - 1) to keep the indicator from
-        // claiming we're done before the response lands.
-        const tickHandle = setInterval(() => {
-          setTileGrid((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  loadedTiles: Math.min(prev.loadedTiles + 1, prev.totalTiles - 1),
-                }
-              : prev,
-          );
-        }, 1000);
-        try {
-          const result = await api.browse.inventoryTiled(pre.tiles);
-          setInventory(result);
-          setInventoryFetchedAt(Date.now());
-          setTileGrid((prev) =>
-            prev ? { ...prev, loadedTiles: prev.totalTiles } : prev,
-          );
-        } finally {
+      // No SSE on the wire yet — we await the aggregated response. The
+      // tile-grid overlay shows the operator that work is happening; we
+      // optimistically tick the progress bar over the expected wall-time
+      // budget so the UI doesn't feel frozen.
+      //
+      // Wall-time estimate: Overpass rate-limits us to ~1 req/sec, so a
+      // 36-tile fetch takes ~40s on the slow path. We tick once per
+      // second up to (totalTiles - 1) to keep the indicator from
+      // claiming we're done before the response lands. The tick is also
+      // generation-guarded so a stale call's ticker can't resurrect the
+      // overlay after a newer call has cleared it.
+      const tickHandle = setInterval(() => {
+        if (!stillCurrent()) {
           clearInterval(tickHandle);
+          return;
         }
+        setTileGrid((prev) =>
+          prev
+            ? {
+                ...prev,
+                loadedTiles: Math.min(prev.loadedTiles + 1, prev.totalTiles - 1),
+              }
+            : prev,
+        );
+      }, 1000);
+      try {
+        const result = await api.browse.inventoryTiled(pre.tiles, signal);
+        if (!stillCurrent()) return;
+        setInventory(result);
+        setInventoryFetchedAt(Date.now());
+        setTileGrid((prev) =>
+          prev ? { ...prev, loadedTiles: prev.totalTiles } : prev,
+        );
       } catch (e) {
+        if (!stillCurrent() || isAbort(e)) return;
         setInventoryError(String(e));
       } finally {
-        setInventoryLoading(false);
+        clearInterval(tickHandle);
+        if (stillCurrent()) setInventoryLoading(false);
       }
       return;
     }
 
     // strategy === "single" (default path)
     try {
-      const result = await api.browse.inventory(forBbox);
+      const result = await api.browse.inventory(forBbox, signal);
+      if (!stillCurrent()) return;
       setInventory(result);
       setInventoryFetchedAt(Date.now());
     } catch (e) {
+      if (!stillCurrent() || isAbort(e)) return;
       setInventoryError(String(e));
     } finally {
-      setInventoryLoading(false);
+      if (stillCurrent()) setInventoryLoading(false);
     }
   }
+
+  // A new bbox means a new inventory — any drill scope from the previous
+  // area is stale. Clearing here (rather than inside InventoryRail) keeps
+  // the map and rail in lockstep without a callback round-trip.
+  useEffect(() => {
+    setDrill(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bbox?.join(",")]);
 
   useEffect(() => {
     if (!bbox) {
@@ -217,18 +280,23 @@ export function BrowseMode() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bbox?.join(","), overpassConsent]);
 
-  // Items rendered on the map. We don't pre-fetch every drill-in scope;
-  // instead we feed BrowseMap the dots from inventory.summary.bbox when we
-  // have a non-capped inventory and the user hasn't drilled in. For v1
-  // this is simplification — the dots reflect "what's been fetched" rather
-  // than "everything in the bbox". A future pass can flatten per-domain
-  // top items into the muted-ink layer on inventory load.
+  // Items rendered on the map — pulled from inventory.centers, which the
+  // backend populates with up to INVENTORY_CENTER_CAP (5000) feature
+  // positions whenever the response isn't area-capped. The map clusters
+  // above 200 dots (BrowseMap CLUSTER_THRESHOLD) so even a full 5000-dot
+  // payload renders cheaply. Centers aren't full BrowseItemSummary
+  // (tags/name aren't fetched at this scope — that's what /browse/item
+  // is for on click) so we synthesise the minimum shape BrowseMap needs.
   const mapItems = useMemo(() => {
-    // For now we don't have per-feature centers in the summary payload
-    // (only domain counts + top tags). Future work could either return
-    // centers from /inventory or pre-fetch the top-N per domain. v1
-    // keeps the map clean — the bbox mask is the primary spatial cue.
-    return [];
+    const centers = inventory?.centers ?? [];
+    if (centers.length === 0) return [];
+    return centers.map((c) => ({
+      osm_id: c.osm_id,
+      name: null,
+      tags: {},
+      geometry_kind: "Point",
+      center: [c.lon, c.lat] as [number, number],
+    }));
   }, [inventory]);
 
   function captureViewport() {
@@ -237,6 +305,48 @@ export function BrowseMode() {
     const next = map.getViewportBbox();
     if (next) setBbox(next);
   }
+
+  // Draw-area state. Held at the BrowseMode level so the command strip
+  // button can toggle off mid-draw and the cleanup runs from one place.
+  const [drawing, setDrawing] = useState(false);
+  const drawHandleRef = useRef<BboxDrawHandle | null>(null);
+
+  function startDrawArea() {
+    const map = mapRef.current;
+    if (!map) return;
+    // If we're already drawing, the button acts as a cancel.
+    if (drawing) {
+      drawHandleRef.current?.dispose();
+      drawHandleRef.current = null;
+      setDrawing(false);
+      return;
+    }
+    // Clear the current bbox first so the dark mask doesn't shadow the
+    // new rectangle while we drag; the previous inventory result clears
+    // as a side-effect, which is the desired UX (operator is starting
+    // over with a new area).
+    setBbox(null);
+    setDrawing(true);
+    drawHandleRef.current = map.startDraw({
+      onCommit: (next) => {
+        drawHandleRef.current = null;
+        setDrawing(false);
+        setBbox(next);
+      },
+      onCancel: () => {
+        drawHandleRef.current = null;
+        setDrawing(false);
+      },
+    });
+  }
+
+  // Clean up any in-flight draw if BrowseMode unmounts.
+  useEffect(() => {
+    return () => {
+      drawHandleRef.current?.dispose();
+      drawHandleRef.current = null;
+    };
+  }, []);
 
   function onSearchPick(hit: NominatimHit) {
     const south = parseFloat(hit.boundingbox[0]);
@@ -305,6 +415,7 @@ export function BrowseMode() {
             selectedOsmId={selectedFeatureId}
             onFeatureClick={(osmId) => setSelectedFeatureId(osmId)}
             tileGrid={tileGrid}
+            inventoryLoading={inventoryLoading}
           />
 
           {/* Command strip — overlaid on the map. */}
@@ -312,11 +423,25 @@ export function BrowseMode() {
             bbox={bbox}
             onSearchPick={onSearchPick}
             onUseViewport={captureViewport}
+            onDrawArea={startDrawArea}
+            drawing={drawing}
             onRefetch={() => bbox && void fetchInventory(bbox)}
+            onCancel={cancelInventory}
             inventoryLoading={inventoryLoading}
             totalCount={inventory?.total_count ?? null}
             areaKm2={inventory?.area_km2 ?? null}
           />
+
+          {/* Draw-mode coaching pill — shown while the operator is dragging
+              out a new bbox. Mirrors the BboxPicker mini-map affordance. */}
+          {drawing && (
+            <div
+              className="pointer-events-none absolute left-1/2 top-24 z-10 -translate-x-1/2 rounded-md border border-[var(--color-accent)] bg-white/95 px-3 py-1.5 text-[11px] uppercase tracking-wider text-[var(--color-accent)] shadow-sm"
+              aria-live="polite"
+            >
+              Drag on the map to draw · Esc to cancel
+            </div>
+          )}
         </main>
 
         <aside className="min-h-0 min-w-0 overflow-x-hidden border-l border-[var(--color-line)] bg-[var(--color-surface-raised)]">
@@ -348,6 +473,8 @@ export function BrowseMode() {
               inventoryFetchedAt={inventoryFetchedAt}
               hoveredOsmId={hoveredFeatureId}
               selectedOsmId={selectedFeatureId}
+              drill={drill}
+              onDrillChange={setDrill}
               onHoverItem={setHoveredFeatureId}
               onSelectItem={(osmId) => setSelectedFeatureId(osmId)}
               onRefetch={() => bbox && void fetchInventory(bbox)}
@@ -460,7 +587,10 @@ function CommandStrip({
   bbox,
   onSearchPick,
   onUseViewport,
+  onDrawArea,
+  drawing,
   onRefetch,
+  onCancel,
   inventoryLoading,
   totalCount,
   areaKm2,
@@ -468,7 +598,10 @@ function CommandStrip({
   bbox: BrowseBbox | null;
   onSearchPick: (hit: NominatimHit) => void;
   onUseViewport: () => void;
+  onDrawArea: () => void;
+  drawing: boolean;
   onRefetch: () => void;
+  onCancel?: () => void;
   inventoryLoading: boolean;
   totalCount: number | null;
   areaKm2: number | null;
@@ -520,13 +653,13 @@ function CommandStrip({
           <div className="h-4 w-px bg-[var(--color-line)]" aria-hidden="true" />
           <Button
             size="sm"
-            variant="ghost"
-            disabled
-            title="Draw-on-map is coming soon. Use Search or Use viewport for now."
+            variant={drawing ? "primary" : "ghost"}
+            onClick={onDrawArea}
+            title={drawing ? "Cancel drawing" : "Click and drag on the map to draw a rectangle"}
           >
-            Draw area
+            {drawing ? "Cancel draw" : "Draw area"}
           </Button>
-          <Button size="sm" variant="ghost" onClick={onUseViewport}>
+          <Button size="sm" variant="ghost" onClick={onUseViewport} disabled={drawing}>
             Use viewport
           </Button>
         </div>
@@ -580,14 +713,25 @@ function CommandStrip({
                 </span>
               </span>
             )}
-            <button
-              type="button"
-              onClick={onRefetch}
-              disabled={inventoryLoading}
-              className="ml-auto rounded-md border border-[var(--color-line)] px-2 py-0.5 text-[10px] uppercase tracking-wider text-[var(--color-ink-soft)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {inventoryLoading ? "…" : "Refetch"}
-            </button>
+            {inventoryLoading && onCancel ? (
+              <button
+                type="button"
+                onClick={onCancel}
+                className="ml-auto rounded-md border border-[var(--color-line)] px-2 py-0.5 text-[10px] uppercase tracking-wider text-[var(--color-ink-soft)] hover:text-[var(--color-ink)]"
+                title="Cancel the in-flight inventory fetch"
+              >
+                Cancel
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onRefetch}
+                disabled={inventoryLoading}
+                className="ml-auto rounded-md border border-[var(--color-line)] px-2 py-0.5 text-[10px] uppercase tracking-wider text-[var(--color-ink-soft)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Refetch
+              </button>
+            )}
           </div>
         )}
       </div>
