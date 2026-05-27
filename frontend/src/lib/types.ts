@@ -49,12 +49,25 @@ export interface PlacemarkPreview {
   has_override: boolean;
 }
 
+/** Truncation report attached to a SourceFile when the synthesizer hit its
+ * hard cap during ingest. `total` is the full size the query would have
+ * returned; `ingested` is what we actually kept; `truncated` is the
+ * difference (purely for display convenience — `total - ingested`). */
+export interface TruncationReport {
+  total: number;
+  ingested: number;
+  truncated: number;
+}
+
 export interface SourceFileSummary {
   id: number;
   filename: string;
   placemark_count: number;
   category_key: string | null;
   created_at: string;
+  /** Set when this SourceFile was created from a query that exceeded the
+   * synthesizer cap. Imported KMLs always have `null` here. */
+  truncation?: TruncationReport | null;
 }
 
 export interface SourceFileDetail {
@@ -187,4 +200,46 @@ export interface BrowseBakeRequest {
 export interface BrowseBakeResponse {
   project_id: number;
   source_file: SourceFileSummary;
+}
+
+// ── Phase L2 (large-query support) ──
+// Mirrors the new preflight + tiled-inventory contracts described in the
+// agent brief. The backend uses these to keep the UI from chewing on
+// catastrophically-large bboxes without warning the operator first.
+
+export type BrowsePreflightStrategy = "single" | "tiled" | "refuse";
+
+export interface BrowseTileGrid {
+  rows: number;
+  cols: number;
+}
+
+/** Returned from `POST /api/browse/preflight`. The strategy controls which
+ * follow-up call the UI should make:
+ *   - "single" → call `browse.inventory` once.
+ *   - "tiled"  → call `browse.inventoryTiled` with the supplied `tiles`.
+ *   - "refuse" → don't call; surface `reason` to the user.
+ * `tile_grid` and `tiles` are non-null exactly when strategy === "tiled". */
+export interface BrowsePreflightResponse {
+  total_count: number;
+  area_km2: number;
+  strategy: BrowsePreflightStrategy;
+  tile_grid: BrowseTileGrid | null;
+  tiles: BrowseBbox[] | null;
+  reason: string | null;
+}
+
+/** Returned from `POST /api/browse/inventory-tiled`. Same shape as the
+ * single-bbox inventory response plus the two tile-aggregation fields. */
+export interface BrowseTiledInventoryResponse extends BrowseInventoryResponse {
+  partial: boolean;
+  failed_tiles: number[];
+}
+
+/** Returned from `POST /api/projects/{id}/overpass-queries/preflight`. */
+export interface OverpassQueryPreflightResponse {
+  total_count: number;
+  estimated_kml_bytes: number;
+  too_large: boolean;
+  hard_cap: number;
 }

@@ -5,8 +5,11 @@ import type {
   BrowseFeatureDetail,
   BrowseInventoryResponse,
   BrowseItemsResponse,
+  BrowsePreflightResponse,
+  BrowseTiledInventoryResponse,
   FeatureStyle,
   IconCatalogue,
+  OverpassQueryPreflightResponse,
   PresetSummary,
   ProjectDetail,
   ProjectSummary,
@@ -190,5 +193,35 @@ export const api = {
         method: "POST",
         body: JSON.stringify(body),
       }),
+
+    // ── Phase L2 (large-query support) ──
+    // Preflight runs a cheap "count + area" check; the result steers the
+    // UI between single-shot, adaptive-tiled, or refuse-with-reason paths.
+    preflight: (bbox: BrowseBbox) =>
+      request<BrowsePreflightResponse>("/browse/preflight", {
+        method: "POST",
+        body: JSON.stringify({ bbox }),
+      }),
+    // Tiled inventory aggregates results across an L1-provided tile grid.
+    // The response carries the same shape as `/inventory` plus a partial
+    // flag + per-tile failure list so the UI can degrade gracefully.
+    inventoryTiled: (tiles: BrowseBbox[]) =>
+      request<BrowseTiledInventoryResponse>("/browse/inventory-tiled", {
+        method: "POST",
+        body: JSON.stringify({ tiles }),
+      }),
   },
+
+  // ── Phase L2 (large-query support) ──
+  // Compose-step preflight — same idea as browse.preflight, but for an
+  // arbitrary Overpass QL string. Lets the UI display feature counts and
+  // estimated KML size before the operator commits to a full bake.
+  runOverpassQueryPreflight: (
+    projectId: number,
+    body: { query: string; bbox: [number, number, number, number] | null },
+  ) =>
+    request<OverpassQueryPreflightResponse>(
+      `/projects/${projectId}/overpass-queries/preflight`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
 };
