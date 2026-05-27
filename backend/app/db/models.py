@@ -30,6 +30,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -72,6 +73,11 @@ class SourceFile(Base):
     parsed_cache: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     # Auto-detected at import. Nullable to handle pre-existing rows; resolved on read.
     category_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    # For Overpass-generated layers: the original (un-substituted) QL the
+    # investigator ran, plus the bbox (as JSON [w,s,e,n]) they targeted.
+    # Both NULL on KMLs imported from disk.
+    overpass_query: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bbox_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     project: Mapped[Project] = relationship(back_populates="source_files")

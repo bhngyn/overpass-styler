@@ -43,9 +43,23 @@ def _apply_lightweight_migrations() -> None:
     inspector = inspect(_engine)
     if "source_files" in inspector.get_table_names():
         existing_cols = {c["name"] for c in inspector.get_columns("source_files")}
-        if "category_key" not in existing_cols:
-            with _engine.begin() as conn:
-                conn.execute(text("ALTER TABLE source_files ADD COLUMN category_key VARCHAR"))
+        additions = [
+            ("category_key", "ALTER TABLE source_files ADD COLUMN category_key VARCHAR"),
+            ("overpass_query", "ALTER TABLE source_files ADD COLUMN overpass_query TEXT"),
+            ("bbox_json", "ALTER TABLE source_files ADD COLUMN bbox_json TEXT"),
+        ]
+        for col, ddl in additions:
+            if col in existing_cols:
+                continue
+            try:
+                with _engine.begin() as conn:
+                    conn.execute(text(ddl))
+            except Exception:
+                # A racing process may have added the column already, or a
+                # fresh DB created the column via create_all between the
+                # inspect() call and the ALTER. Either way, the column now
+                # exists — that's the only state we cared about.
+                pass
 
 
 def get_session() -> Iterator[Session]:
