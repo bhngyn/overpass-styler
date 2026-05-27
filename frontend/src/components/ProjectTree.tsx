@@ -88,6 +88,9 @@ export function ProjectTree() {
                     </code>
                   </span>
                 )}
+                {sf.truncation && (
+                  <TruncationPip truncation={sf.truncation} />
+                )}
               </button>
               <span className="text-[10px] text-[var(--color-ink-faint)]">
                 {detail?.placemark_count ?? sf.placemark_count}
@@ -117,6 +120,30 @@ export function ProjectTree() {
         );
       })}
     </div>
+  );
+}
+
+/** Truncation pip — small caption rendered under the filename when a
+ * SourceFile's ingest hit the synthesizer cap. Hover for the exact
+ * counts; the inline text stays short to keep the row from growing. */
+function TruncationPip({
+  truncation,
+}: {
+  truncation: NonNullable<
+    import("@/lib/types").SourceFileSummary["truncation"]
+  >;
+}) {
+  const { total, ingested, truncated } = truncation;
+  return (
+    <span
+      className="mt-0.5 inline-flex items-center gap-1 rounded-full border border-[var(--color-warning,#b88f49)] px-1.5 py-0 text-[9px] uppercase tracking-[0.16em] text-[var(--color-warning,#b88f49)]"
+      title={`Truncated: ${truncated.toLocaleString()} of ${total.toLocaleString()} features dropped (kept ${ingested.toLocaleString()})`}
+    >
+      <span aria-hidden="true">⚑</span>
+      <span>
+        truncated · {ingested.toLocaleString()} of {total.toLocaleString()}
+      </span>
+    </span>
   );
 }
 
