@@ -2,9 +2,11 @@ import { useEffect } from "react";
 import { useProjectStore } from "@/stores/project";
 import { ProjectPicker } from "@/components/ProjectPicker";
 import { ProjectWorkspace } from "@/components/ProjectWorkspace";
+import { BrowseMode } from "@/components/BrowseMode";
 
 export default function App() {
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
+  const mode = useProjectStore((s) => s.mode);
   const refresh = useProjectStore((s) => s.refreshProjects);
   const error = useProjectStore((s) => s.error);
   const setError = useProjectStore((s) => s.setError);
@@ -12,6 +14,19 @@ export default function App() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Three-way router (Phase B5):
+  //   mode === "browse"                     → Field Atlas
+  //   mode === "project" && no current proj → picker
+  //   mode === "project" && current proj    → workspace
+  let body;
+  if (mode === "browse") {
+    body = <BrowseMode />;
+  } else if (currentProjectId == null) {
+    body = <ProjectPicker />;
+  } else {
+    body = <ProjectWorkspace />;
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -23,7 +38,7 @@ export default function App() {
           </button>
         </div>
       )}
-      {currentProjectId == null ? <ProjectPicker /> : <ProjectWorkspace />}
+      {body}
     </div>
   );
 }
