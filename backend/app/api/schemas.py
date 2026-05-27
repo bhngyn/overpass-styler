@@ -71,6 +71,13 @@ class SourceFileSummary(BaseModel):
     placemark_count: int
     category_key: str | None
     created_at: datetime
+    # Provenance for query-derived layers — the original QL the investigator
+    # authored (with ``{{bbox}}`` un-substituted) and the bbox they targeted.
+    # Both null for KML uploads. The frontend uses these to render a small
+    # "from query" pip in the layer tree and to power the "re-run query"
+    # affordance D3 flagged.
+    overpass_query: str | None = None
+    bbox_json: str | None = None
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -100,15 +107,19 @@ class SourceFileDetail(BaseModel):
     category_key: str | None
     category_counts: dict[str, int]
     placemarks: list[PlacemarkPreview]
+    # Same provenance fields as SourceFileSummary — present on detail too so
+    # the inspector can show "re-run this query" without a second round-trip.
+    overpass_query: str | None = None
+    bbox_json: str | None = None
 
 
 class CreateProjectRequest(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1, max_length=200)
 
 
 class UpdateProjectRequest(BaseModel):
-    name: str | None = None
-    category_key: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    category_key: str | None = Field(default=None, max_length=200)
 
 
 class SetCategoryStyleRequest(BaseModel):

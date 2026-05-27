@@ -106,16 +106,16 @@ def test_overpass_endpoint_response_shape_matches_upload(
     r = client.post(f"/api/projects/{pid}/overpass-queries", json=payload)
     assert r.status_code == 201, r.text
     body = r.json()
-    # Same shape as the upload endpoint's SourceFileSummary response.
-    assert set(body.keys()) == {
-        "id",
-        "filename",
-        "placemark_count",
-        "category_key",
-        "created_at",
-    }
+    # Same shape as the upload endpoint's SourceFileSummary response — the
+    # core fields. Query-derived layers additionally surface the provenance
+    # fields (overpass_query, bbox_json) so the frontend can render a
+    # "re-run this query" affordance; those are null on upload-derived rows.
+    core_fields = {"id", "filename", "placemark_count", "category_key", "created_at"}
+    assert core_fields <= set(body.keys())
     assert body["placemark_count"] == 2
     assert body["category_key"] == "amenity"
+    assert body["overpass_query"] == payload["query"]
+    assert body["bbox_json"] is not None
 
 
 def test_bbox_substitution_uses_overpass_south_west_north_east_order(

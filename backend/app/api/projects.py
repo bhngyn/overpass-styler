@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -20,7 +21,7 @@ from app.db.models import (
 from app.db.session import get_session
 from app.enrichment import overpass
 from app.kml.category import detect_category_key
-from app.kml.from_overpass import synthesize_kml
+from app.kml.from_overpass import DEFAULT_MAX_ELEMENTS, synthesize_kml
 from app.kml.parse import parse_kml
 from app.kml.serialize import SourceLayer, StyledDocument, serialize
 from app.kml.style import FeatureStyle
@@ -76,6 +77,8 @@ def _source_file_summary(sf: SourceFile) -> SourceFileSummary:
         placemark_count=len((sf.parsed_cache or {}).get("placemarks", [])),
         category_key=_source_file_category_key(sf),
         created_at=sf.created_at,
+        overpass_query=sf.overpass_query,
+        bbox_json=sf.bbox_json,
     )
 
 
@@ -266,18 +269,86 @@ async def import_kml(
     )
 
 
+def _check_finite_bbox(v: list[float] | None) -> list[float] | None:
+    """Reject NaN / Infinity / wrong-length bboxes at the Pydantic boundary."""
+    if v is None:
+        return v
+    if len(v) != 4:
+        raise ValueError("bbox must have exactly 4 components [w, s, e, n]")
+    for i, x in enumerate(v):
+        if not math.isfinite(x):
+            raise ValueError(f"bbox component {i} is not finite ({x!r})")
+    return v
+
+
 class _OverpassQueryRequest(BaseModel):
-    name: str = Field(..., description="Layer name shown in the tree + KML Document name.")
-    query: str = Field(..., description="Overpass QL. May contain {{bbox}} placeholders.")
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        description="Layer name shown in the tree + KML Document name.",
+    )
+    query: str = Field(
+        ...,
+        min_length=1,
+        max_length=20_000,
+        description="Overpass QL. May contain {{bbox}} placeholders.",
+    )
     bbox: list[float] | None = Field(
         default=None,
+        min_length=4,
+        max_length=4,
         description="[west, south, east, north]. Required if the query uses {{bbox}}.",
     )
     region_label: str | None = Field(
         default=None,
+        max_length=200,
         description="Human-readable region name for UI display (e.g. 'N'Djamena'). "
         "Stored alongside the bbox; not used during query execution.",
     )
+
+    @field_validator("bbox")
+    @classmethod
+    def _bbox_finite(cls, v: list[float] | None) -> list[float] | None:
+        return _check_finite_bbox(v)
+
+
+class _OverpassPreflightRequest(BaseModel):
+    """Cheap probe before committing to an Overpass-query layer ingest.
+
+    Mirrors :class:`_OverpassQueryRequest` so the frontend can reuse the
+    same form payload — the only difference is that ``name`` is optional
+    (the user hasn't picked a layer name yet at preflight time).
+    """
+
+    query: str = Field(..., min_length=1, max_length=20_000)
+    bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
+
+    @field_validator("bbox")
+    @classmethod
+    def _bbox_finite(cls, v: list[float] | None) -> list[float] | None:
+        return _check_finite_bbox(v)
+
+
+class TruncationReportSchema(BaseModel):
+    total: int
+    ingested: int
+    truncated: bool
+
+
+class IngestEnvelope(BaseModel):
+    """Wraps :class:`SourceFileSummary` with the truncation info Overpass
+    callers need to surface a "we capped this" warning to the investigator."""
+
+    source_file: SourceFileSummary
+    truncation: TruncationReportSchema
+
+
+class OverpassPreflightResponse(BaseModel):
+    total_count: int
+    estimated_kml_bytes: int
+    too_large: bool
+    hard_cap: int
 
 
 _BBOX_PLACEHOLDER_RE = re.compile(r"\{\{\s*bbox\s*\}\}")
@@ -322,7 +393,11 @@ async def run_overpass_query(
     except overpass.OverpassError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    raw_kml = synthesize_kml(req.name, result)
+    # synthesize_kml returns (bytes, TruncationReport) — L1's cap-aware
+    # synthesizer truncates very large results gracefully and tells us how
+    # many elements were dropped. The truncation info isn't yet surfaced
+    # through this endpoint; the schema envelope upgrade is L2's territory.
+    raw_kml, _truncation = synthesize_kml(req.name, result)
     filename = f"{req.name}.overpass.kml"
     return _ingest_kml_bytes(
         session,
@@ -383,6 +458,8 @@ def get_source_file(
         category_key=sf_category_key,
         category_counts=category_counts,
         placemarks=previews,
+        overpass_query=sf.overpass_query,
+        bbox_json=sf.bbox_json,
     )
 
 
