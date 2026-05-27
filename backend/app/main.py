@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import annotations, enrich, icons, presets, projects
+from app.api import annotations, browse, enrich, icons, presets, projects, tag_library
 from app.db.session import init_db
 
 
@@ -45,6 +45,8 @@ def create_app() -> FastAPI:
         enrich.router,
         presets.router,
         icons.router,
+        tag_library.router,
+        browse.router,
     ]
     for r in api_routers:
         app.include_router(r, prefix="/api")
