@@ -581,6 +581,10 @@ async def get_items(
         result = await area_inventory.fetch_domain_items(
             bbox_t, key, value, limit=limit, offset=offset
         )
+    except area_inventory.InvalidOsmTagError as exc:
+        # Invalid OSM tag — almost certainly a malformed client request or
+        # an injection attempt. 400 with the offending token surfaced.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except overpass.OverpassError as exc:
         raise HTTPException(status_code=502, detail=f"Overpass call failed: {exc}") from exc
     return ItemsResponse(

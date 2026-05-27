@@ -32,12 +32,37 @@ import hashlib
 import json
 import math
 import os
+import re
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
 from . import overpass
+
+
+# Allowed character set for OSM tag keys and values when interpolated into
+# Overpass QL. Real OSM tags are restricted to letters, digits, underscore,
+# colon, hyphen, dot, and forward slash (the last for path-like values like
+# "construction:railway"). Anything else is either a malformed tag or an
+# injection attempt — reject before it hits Overpass.
+#
+# D1 review caught this: `fetch_domain_items` interpolated `key` and `value`
+# straight into the QL string, so a value like `x"];out:csv(...);//` would
+# escape the literal and reshape the query server-side.
+_OSM_TAG_TOKEN = re.compile(r"^[A-Za-z0-9_:./-]+$")
+
+
+class InvalidOsmTagError(ValueError):
+    """Raised when a key/value pair can't be safely interpolated into QL."""
+
+
+def _validate_osm_token(name: str, token: str) -> None:
+    if not _OSM_TAG_TOKEN.match(token):
+        raise InvalidOsmTagError(
+            f"OSM {name} {token!r} contains characters that aren't safe to "
+            f"interpolate into an Overpass query"
+        )
 
 # Cache TTL: 24 hours. Browse results are reconnaissance — investigators
 # repeatedly drill in/out of the same area in one session, but a day-old
@@ -361,6 +386,13 @@ async def fetch_domain_items(
     paginate, so we fetch the full set, cache it, and slice. ``has_more`` is
     True when more items exist beyond ``offset + limit``.
     """
+    # Reject anything that wouldn't survive a strict OSM-tag character class
+    # before interpolating into QL. The router does its own validation but
+    # this is defence-in-depth — any future caller that bypasses the router
+    # still can't reshape the Overpass query.
+    _validate_osm_token("key", key)
+    _validate_osm_token("value", value)
+
     cache_path = _cache_path("items", [list(bbox), key, value])
     cached = _cache_read(cache_path)
     if cached is None:

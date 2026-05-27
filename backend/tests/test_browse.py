@@ -485,6 +485,40 @@ def client(_isolated_data_dir: Path) -> Iterator[TestClient]:
         yield c
 
 
+def test_items_endpoint_rejects_unsafe_tag_value(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression for D1 review: ``key`` and ``value`` flowed straight into
+    the Overpass QL via f-string. Reject anything outside the OSM-tag
+    character class before it can reshape the query."""
+    from app.enrichment import area_inventory as ai
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        ai.overpass,
+        "execute_query",
+        _fake_query_dispatcher(calls, {"out body geom;": {"elements": []}}),
+    )
+
+    # A value that would break out of the quoted literal and tack on an
+    # additional Overpass statement.
+    payload = (
+        'x"];out:csv("name","ref");//'
+    )
+    r = client.get(
+        "/api/browse/items",
+        params={
+            "bbox": "15.04,12.10,15.06,12.12",
+            "key": "amenity",
+            "value": payload,
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert "value" in r.json()["detail"].lower()
+    # Most importantly: we never reached Overpass.
+    assert calls == []
+
+
 def test_inventory_endpoint(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, small_area_elements
 ):
