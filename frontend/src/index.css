@@ -1,0 +1,65 @@
+@import "tailwindcss";
+@import "maplibre-gl/dist/maplibre-gl.css";
+
+/* Design tokens — kept small and disciplined so the UI feels considered, not
+   stitched together. */
+@theme {
+  --color-surface: #f7f6f3;            /* page background — warm off-white */
+  --color-surface-raised: #ffffff;     /* panels, cards */
+  --color-surface-sunken: #ebe9e3;     /* sidebars, footers */
+  --color-ink: #1a1714;                /* primary text — near-black, warm */
+  --color-ink-soft: #5b554e;           /* secondary text */
+  --color-ink-faint: #8b857c;          /* tertiary text, meta */
+  --color-line: #d8d4cc;               /* hairlines, borders */
+  --color-line-strong: #b5afa3;        /* hover borders */
+  --color-accent: #b14a1a;             /* burnt-orange — restrained but distinct */
+  --color-accent-soft: #f3e6dd;
+  --color-danger: #a3201f;
+  --color-success: #2f6f3a;
+  --color-warning: #b6802b;
+  --font-display: "Source Serif 4", "Charter", "Georgia", ui-serif, serif;
+  --font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  font-family: var(--font-body);
+  color: var(--color-ink);
+  background: var(--color-surface);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+/* Subtle focus ring rather than the default chunky blue outline. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* MapLibre attribution control — tone down so it sits politely. */
+.maplibregl-ctrl-attrib {
+  font-size: 10px !important;
+  color: var(--color-ink-faint) !important;
+}
+
+/* Hover-popup body. The popup's tip is styled by maplibre; the inner content
+   we control directly in buildPopupHtml. Just trim the default padding so our
+   own padding controls the layout. */
+.maplibregl-popup.feature-hover-popup .maplibregl-popup-content {
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-line);
+  box-shadow: 0 8px 24px -8px rgba(26, 23, 20, 0.18);
+  font-family: var(--font-body);
+}
+.maplibregl-popup.feature-hover-popup .maplibregl-popup-tip {
+  border-top-color: white;
+  border-bottom-color: white;
+}

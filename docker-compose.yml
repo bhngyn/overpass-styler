@@ -1,0 +1,13 @@
+services:
+  overpass-styler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: overpass-styler:local
+    container_name: overpass-styler
+    ports:
+      - "8000:8000"
+    volumes:
+      # Investigator data persists across `docker compose up/down` cycles.
+      - ./data:/data
+    restart: unless-stopped

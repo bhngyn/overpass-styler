@@ -1,0 +1,19 @@
+# Dev-only image for the Vite dev server.
+# Source files are delivered via `docker compose watch` (sync action). Vite's
+# own HMR handles the in-browser refresh once the file lands in /app/src.
+
+FROM node:22-alpine
+
+WORKDIR /app
+
+# Install deps. Lockfile is optional; npm install creates one if missing.
+COPY package.json package-lock.json* ./
+RUN npm ci || npm install
+
+# Seed source so the dev server can start before the first watch sync.
+COPY . .
+
+EXPOSE 5173
+
+# `--host 0.0.0.0` so the port is reachable from outside the container.
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

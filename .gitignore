@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local data (SQLite DB, uploaded KMLs)
+data/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+.cache/
+.claude/
+
+# Build / docker
+*.log
+
+# Ad-hoc investigation data at the repo root (move to a fixtures/ dir if you
+# actually want them tracked).
+/*.kml
+/*.kmz

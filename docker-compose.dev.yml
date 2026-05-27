@@ -1,0 +1,72 @@
+# Development compose file with live code reload via `docker compose watch`.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up --watch --build
+#   open http://localhost:5173
+#
+# - Vite dev server is on :5173; it proxies /api → backend:8000 over the
+#   compose network.
+# - Backend runs uvicorn --reload; saving a .py triggers reload within ~1s.
+# - The `develop.watch` blocks:
+#     * sync code paths into the container (no rebuild, ~instant)
+#     * rebuild the image when dependency manifests (pyproject.toml,
+#       package.json) change.
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    container_name: overpass-styler-backend-dev
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      OVERPASS_STYLER_DEV: "1"
+    develop:
+      watch:
+        - action: sync
+          path: ./backend/app
+          target: /app/app
+        - action: rebuild
+          path: ./backend/pyproject.toml
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: overpass-styler-frontend-dev
+    ports:
+      - "5173:5173"
+    environment:
+      # vite.config.ts reads this to point its /api proxy at the backend
+      # service over the compose network.
+      VITE_API_TARGET: "http://backend:8000"
+    depends_on:
+      - backend
+    develop:
+      watch:
+        - action: sync
+          path: ./frontend/src
+          target: /app/src
+        - action: sync
+          path: ./frontend/index.html
+          target: /app/index.html
+        - action: sync
+          path: ./frontend/vite.config.ts
+          target: /app/vite.config.ts
+        - action: sync
+          path: ./frontend/tsconfig.app.json
+          target: /app/tsconfig.app.json
+        - action: sync
+          path: ./frontend/tsconfig.json
+          target: /app/tsconfig.json
+        - action: sync
+          path: ./frontend/tsconfig.node.json
+          target: /app/tsconfig.node.json
+        - action: sync
+          path: ./frontend/public
+          target: /app/public
+        - action: rebuild
+          path: ./frontend/package.json
