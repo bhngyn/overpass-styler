@@ -651,29 +651,40 @@ export function searchSubjects(
 }
 
 /** Match-strength score, 0–2:
- *   2 = exact match
- *   1 = substring match (prefix beats mid-string)
- *   0.6 = fuzzy match (Levenshtein distance ≤ 2 on token-of-length-≥4)
- *   0 = no match
+ *   2   = exact match
+ *   1.4 = prefix match
+ *   1   = substring match
+ *   0.6 = fuzzy match (Levenshtein distance ≤ cap)
+ *   0   = no match
+ *
+ * Fuzzy thresholds scale with query length to avoid 4-letter false positives.
+ * Empirically: at length 4 (the natural floor of investigator queries), a
+ * distance-2 cap admits ``park → care``, ``bench → trench``, ``park → yard``.
+ * Bumping the cap requirement to length 6+ for distance 2, and length 5 for
+ * distance 1, keeps the legitimate misspelling hits (``prsion → prison``,
+ * ``hosptial → hospital``, ``mosqu → mosque``) while filtering the noise.
  */
 function scoreMatch(q: string, field: string): number {
   if (field === q) return 2;
   if (field.startsWith(q)) return 1.4;
   if (field.includes(q)) return 1;
 
-  // Fuzzy: only for tokens long enough to make distance-2 meaningful, and
-  // only when the candidate is roughly the same length as the query (so a
-  // 3-char typo doesn't match a 30-char description).
-  if (q.length >= 4 && Math.abs(field.length - q.length) <= 3) {
-    if (levenshteinAtMost(q, field, 2)) return 0.6;
+  const maxDistance = q.length >= 6 ? 2 : q.length >= 5 ? 1 : 0;
+  if (maxDistance === 0) return 0;
+
+  if (Math.abs(field.length - q.length) <= maxDistance + 1) {
+    if (levenshteinAtMost(q, field, maxDistance)) return 0.6;
   }
 
-  // Token-level fuzzy: check every word in the field.
-  if (q.length >= 4) {
-    for (const token of field.split(/[\s_-]+/)) {
-      if (token.length >= 4 && Math.abs(token.length - q.length) <= 2) {
-        if (levenshteinAtMost(q, token, 2)) return 0.5;
-      }
+  // Token-level fuzzy: check every word in the field. Same cap, but the
+  // size-tolerance is slightly tighter since the field token, not the
+  // whole field, is the comparator.
+  for (const token of field.split(/[\s_-]+/)) {
+    if (
+      token.length >= 4 &&
+      Math.abs(token.length - q.length) <= maxDistance
+    ) {
+      if (levenshteinAtMost(q, token, maxDistance)) return 0.5;
     }
   }
 

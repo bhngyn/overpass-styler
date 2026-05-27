@@ -18,6 +18,7 @@ import { QueryEditor, type QueryDraft } from "@/components/QueryEditor";
 import { useProjectStore } from "@/stores/project";
 import { api } from "@/lib/api";
 import type { GlossaryEntry } from "@/lib/tagLibrary.types";
+import { SUBJECT_CATALOG } from "@/lib/subjectCatalog";
 
 // Module-level session flag — once the investigator confirms the first
 // Overpass call, we don't ask again until the page reloads.
@@ -48,6 +49,7 @@ function newDraft(): QueryDraft {
     regionLabel: null,
     lastRunResult: null,
     selectedSubjectIds: [],
+    customTags: [],
     editorMode: "builder",
   };
 }
@@ -164,15 +166,16 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
 
   async function handleAddAsLayer() {
     if (!selectedDraft) return;
-    if (!selectedDraft.name.trim()) {
-      setError("Give the layer a name first.");
-      return;
-    }
     setAddingDraftId(selectedDraft.id);
     setError(null);
     try {
       const sfid = await runOverpassQuery({
-        name: selectedDraft.name.trim(),
+        // Auto-name when blank, so a non-technical investigator who doesn't
+        // bother with the layer-name field never hits a silent validation
+        // failure. The auto-name draws from the selected subjects + the
+        // region label so it reads like something the user might have
+        // typed themselves. They can rename in the Style step.
+        name: selectedDraft.name.trim() || autoLayerName(selectedDraft),
         query: selectedDraft.query,
         bbox: selectedDraft.bbox,
         regionLabel: selectedDraft.regionLabel,
@@ -345,7 +348,7 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
           </div>
         )}
         {selectedDraft && (
-          <div className="mx-auto w-full max-w-[640px] px-6 py-6">
+          <div className="w-full px-5 py-5">
             <QueryEditor
               draft={selectedDraft}
               onChange={updateDraft}
@@ -377,6 +380,34 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
       </section>
     </div>
   );
+}
+
+/** Generate a default layer name from the draft's selected subjects + region.
+ *
+ *  Examples (region label "Chad"):
+ *   1 subject:  "Prisons & detention — Chad"
+ *   2 subjects: "Prisons & detention + Hospitals & clinics — Chad"
+ *   3 subjects: "Prisons & detention + 2 more — Chad"
+ *   no subjects (raw mode only): "Untitled query — Chad" or just a timestamp
+ */
+function autoLayerName(draft: QueryDraft): string {
+  const labels = draft.selectedSubjectIds
+    .map((id) => SUBJECT_CATALOG.find((s) => s.id === id)?.label)
+    .filter((l): l is string => typeof l === "string");
+
+  let base: string;
+  if (labels.length === 0) {
+    base = "Untitled query";
+  } else if (labels.length === 1) {
+    base = labels[0];
+  } else if (labels.length === 2) {
+    base = `${labels[0]} + ${labels[1]}`;
+  } else {
+    base = `${labels[0]} + ${labels.length - 1} more`;
+  }
+
+  const region = draft.regionLabel?.split(",")[0]?.trim();
+  return region ? `${base} — ${region}` : base;
 }
 
 function SourcePip({ kind }: { kind: "query" | "upload" }) {

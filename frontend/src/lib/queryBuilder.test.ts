@@ -492,6 +492,21 @@ describe("searchSubjects", () => {
     const hits = searchSubjects("", FIXTURE_GLOSSARY);
     expect(hits).toEqual([]);
   });
+
+  // Regression: at length 4, distance-2 fuzzy used to admit false positives.
+  // "park" Levenshtein-2 to "care" (substitute p→c, k→e) once matched the
+  // "health care" alias on Hospitals & clinics; "bench"→"trench" (distance 2)
+  // matched Fortifications via the "trench" alias. The tightened threshold
+  // requires length ≥ 5 for distance-1 and length ≥ 6 for distance-2.
+  it.each([
+    ["park", "hospitals-clinics"],
+    ["park", "schools"],
+    ["bench", "fortifications"],
+  ])('"%s" must NOT fuzzy-match "%s"', (q, badId) => {
+    const hits = searchSubjects(q, FIXTURE_GLOSSARY);
+    const matched = hits.some((h) => h.subject.id === badId);
+    expect(matched, `${q} unexpectedly matched ${badId}`).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

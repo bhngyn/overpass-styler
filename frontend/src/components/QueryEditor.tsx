@@ -32,9 +32,11 @@ import type { OverpassQueryPreflightResponse } from "@/lib/types";
 import type { GlossaryEntry } from "@/lib/tagLibrary.types";
 import {
   buildQuery,
+  customTagsToBlocks,
   matchSubjects,
   toQL,
   tryParse,
+  type CustomTag,
 } from "@/lib/queryBuilder";
 
 export interface QueryDraftRunResult {
@@ -60,6 +62,9 @@ export interface QueryDraft {
    *  ``query`` is derived from this on every change; in ``"raw"`` mode the
    *  array is preserved but no longer drives emission. */
   selectedSubjectIds: string[];
+  /** User-picked OSM tags outside the curated catalog. Surfaced alongside
+   *  subjects in the Builder; emitted as union blocks at QL time. */
+  customTags: CustomTag[];
   /** Which editing surface is active. New drafts start in ``"builder"``. */
   editorMode: EditorMode;
 }
@@ -205,28 +210,45 @@ export function QueryEditor({
 
   // ── Builder ↔ draft glue ────────────────────────────────────────────────
   // The Builder is pure: it never reads or writes draft.query directly. We
-  // recompute the QL string from selectedSubjectIds on every change and
-  // update both fields atomically.
-  function handleSubjectsChange(next: string[]) {
+  // recompute the QL string from selectedSubjectIds + customTags on every
+  // change and update all three fields atomically. Both helpers below
+  // call into the same regenerator with the right shape.
+  function regenerateAndCommit(next: Partial<QueryDraft>) {
+    const merged: QueryDraft = { ...draft, ...next };
     const q = toQL(
-      buildQuery({ subjectIds: next, glossary: glossaryEntries }),
+      buildQuery({
+        subjectIds: merged.selectedSubjectIds,
+        customBlocks: customTagsToBlocks(merged.customTags),
+        glossary: glossaryEntries,
+      }),
     );
-    handleDraftChange({
-      ...draft,
-      selectedSubjectIds: next,
-      query: q,
-    });
+    handleDraftChange({ ...merged, query: q });
+  }
+
+  function handleSubjectsChange(next: string[]) {
+    regenerateAndCommit({ selectedSubjectIds: next });
+  }
+
+  function handleCustomTagsChange(next: CustomTag[]) {
+    regenerateAndCommit({ customTags: next });
   }
 
   // ── Mode switching ──────────────────────────────────────────────────────
   function switchToRaw() {
-    // Builder → Raw: serialise current subjects to QL once, then hand
-    // ownership of the string to the textarea. selectedSubjectIds is kept
-    // so that switching back can attempt round-trip.
+    // Builder → Raw: serialise current selection (subjects + custom tags)
+    // to QL once, then hand ownership of the string to the textarea. The
+    // selection arrays are kept so that switching back can attempt
+    // round-trip.
     const q =
       draft.query.trim().length > 0
         ? draft.query
-        : toQL(buildQuery({ subjectIds: draft.selectedSubjectIds, glossary: glossaryEntries }));
+        : toQL(
+            buildQuery({
+              subjectIds: draft.selectedSubjectIds,
+              customBlocks: customTagsToBlocks(draft.customTags),
+              glossary: glossaryEntries,
+            }),
+          );
     setModeSwitchBanner(null);
     handleDraftChange({ ...draft, editorMode: "raw", query: q });
   }
@@ -269,17 +291,9 @@ export function QueryEditor({
       ...draft,
       editorMode: "builder",
       selectedSubjectIds: [],
+      customTags: [],
       query: toQL(buildQuery({ subjectIds: [], glossary: glossaryEntries })),
     });
-  }
-
-  // The Builder's SubjectPicker has a "Browse all OpenStreetMap tags
-  // (advanced)" fallback. Clicking it flips the editor into raw mode so
-  // the Tag Library drawer's insertion path (which writes into the
-  // textarea) has somewhere to land, then opens the drawer.
-  function handleOpenTagLibraryFromBuilder() {
-    switchToRaw();
-    onOpenTagLibrary?.();
   }
 
   return (
@@ -338,11 +352,12 @@ export function QueryEditor({
       {draft.editorMode === "builder" ? (
         <QueryBuilder
           selectedSubjectIds={draft.selectedSubjectIds}
-          onChange={handleSubjectsChange}
+          onChangeSubjectIds={handleSubjectsChange}
+          customTags={draft.customTags}
+          onChangeCustomTags={handleCustomTagsChange}
           glossaryEntries={glossaryEntries}
           glossaryLoading={glossaryLoading}
           glossaryError={glossaryError}
-          onOpenTagLibrary={onOpenTagLibrary ? handleOpenTagLibraryFromBuilder : undefined}
         />
       ) : (
         <div>

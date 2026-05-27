@@ -58,6 +58,25 @@ export interface StructuredQuery {
 
 export const EMPTY_QUERY: StructuredQuery = { blocks: [], combine: "any" };
 
+/** A user-picked OSM tag that isn't part of the curated subject catalog.
+ *  Picked from the SubjectPicker's "All OSM tags" section (which calls
+ *  Taginfo). ``value === null`` means a key-only filter (``[key]``). */
+export interface CustomTag {
+  key: string;
+  value: string | null;
+}
+
+/** Convert each CustomTag into a FeatureBlock for ``buildQuery``. Each
+ *  becomes its own block, OR'd into the rest via the standard union. */
+export function customTagsToBlocks(tags: readonly CustomTag[]): FeatureBlock[] {
+  return tags.map((t) => ({
+    tags:
+      t.value === null
+        ? [{ key: t.key, op: "exists" as const, value: "" }]
+        : [{ key: t.key, op: "=" as const, value: t.value }],
+  }));
+}
+
 // ---------------------------------------------------------------------------
 // Glossary helpers
 // ---------------------------------------------------------------------------

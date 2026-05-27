@@ -6,13 +6,19 @@
  * (Prisons & detention, Hospitals & clinics, …) and the QL is emitted
  * downstream from the resolved subject set.
  *
- * Selection lives on the QueryDraft; this component is pure with respect
- * to it — parent owns ``selectedSubjectIds`` and the curated glossary.
+ * Selections come in two flavours: curated subjects (the catalog) and
+ * custom OSM tags picked from the broader Taginfo search inside the
+ * SubjectPicker. Both render as chips here; both emit blocks at QL
+ * generation time. The "Generated query" disclosure surfaces the live
+ * Overpass QL for transparency + learning — collapsed by default so a
+ * non-technical investigator never has to look at it, expandable when
+ * they want to.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { SubjectChip } from "@/components/SubjectChip";
+import { CustomTagChip } from "@/components/CustomTagChip";
 import { SubjectPicker } from "@/components/SubjectPicker";
 import {
   SEED_SCENARIOS,
@@ -20,30 +26,35 @@ import {
   searchSubjects,
   type SubjectSearchHit,
 } from "@/lib/subjectCatalog";
+import { buildQuery, customTagsToBlocks, toQL, type CustomTag } from "@/lib/queryBuilder";
+import { searchOsmTags, type OsmTagHit } from "@/lib/osmTagSearch";
 import type { GlossaryEntry } from "@/lib/tagLibrary.types";
 
 interface Props {
   selectedSubjectIds: string[];
-  onChange: (next: string[]) => void;
+  onChangeSubjectIds: (next: string[]) => void;
+  customTags: CustomTag[];
+  onChangeCustomTags: (next: CustomTag[]) => void;
   glossaryEntries: GlossaryEntry[];
   glossaryLoading: boolean;
   glossaryError: string | null;
-  onOpenTagLibrary?: () => void;
 }
 
 const MAX_INLINE_HITS = 6;
 
 export function QueryBuilder({
   selectedSubjectIds,
-  onChange,
+  onChangeSubjectIds,
+  customTags,
+  onChangeCustomTags,
   glossaryEntries,
   glossaryLoading,
   glossaryError,
-  onOpenTagLibrary,
 }: Props) {
   const [search, setSearch] = useState("");
   const [searchFocused, setSearchFocused] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [showGeneratedQL, setShowGeneratedQL] = useState(false);
 
   const searchWrapRef = useRef<HTMLDivElement | null>(null);
 
@@ -63,14 +74,34 @@ export function QueryBuilder({
 
   const trimmed = search.trim();
   const selectedSet = useMemo(() => new Set(selectedSubjectIds), [selectedSubjectIds]);
+  const customTagKeySet = useMemo(
+    () => new Set(customTags.map(tagKey)),
+    [customTags],
+  );
 
-  const hits = useMemo<SubjectSearchHit[]>(
+  const curatedHits = useMemo<SubjectSearchHit[]>(
     () =>
       trimmed
         ? searchSubjects(trimmed, glossaryEntries, SUBJECT_CATALOG, MAX_INLINE_HITS)
         : [],
     [trimmed, glossaryEntries],
   );
+
+  // OSM tag hits from the offline bundled index. The single inline search is
+  // the only place the investigator searches — no separate modal search —
+  // so this dropdown carries the full surface. Drop curated tag pairs to
+  // avoid double-rendering things already in the HR-curated section.
+  const osmHits = useMemo<OsmTagHit[]>(() => {
+    if (!trimmed) return [];
+    const curatedTagKeys = new Set(
+      glossaryEntries
+        .filter((e) => e.value !== null)
+        .map((e) => `${e.key}=${e.value}`),
+    );
+    return searchOsmTags(trimmed, MAX_INLINE_HITS * 2).filter(
+      (h) => !curatedTagKeys.has(`${h.entry.key}=${h.entry.value}`),
+    );
+  }, [trimmed, glossaryEntries]);
 
   const selectedSubjects = useMemo(
     () =>
@@ -80,13 +111,27 @@ export function QueryBuilder({
     [selectedSubjectIds],
   );
 
+  const hasSelection = selectedSubjects.length > 0 || customTags.length > 0;
+
+  const generatedQL = useMemo(
+    () =>
+      toQL(
+        buildQuery({
+          subjectIds: selectedSubjectIds,
+          customBlocks: customTagsToBlocks(customTags),
+          glossary: glossaryEntries,
+        }),
+      ),
+    [selectedSubjectIds, customTags, glossaryEntries],
+  );
+
   function addSubject(id: string) {
     if (selectedSet.has(id)) return;
-    onChange([...selectedSubjectIds, id]);
+    onChangeSubjectIds([...selectedSubjectIds, id]);
   }
 
   function removeSubject(id: string) {
-    onChange(selectedSubjectIds.filter((s) => s !== id));
+    onChangeSubjectIds(selectedSubjectIds.filter((s) => s !== id));
   }
 
   function toggleSubject(id: string) {
@@ -94,18 +139,39 @@ export function QueryBuilder({
     else addSubject(id);
   }
 
+  function toggleCustomTag(key: string, value: string | null) {
+    const tag: CustomTag = { key, value };
+    const tk = tagKey(tag);
+    if (customTagKeySet.has(tk)) {
+      onChangeCustomTags(customTags.filter((t) => tagKey(t) !== tk));
+    } else {
+      onChangeCustomTags([...customTags, tag]);
+    }
+  }
+
   function applySeed(ids: string[]) {
-    onChange(ids);
+    onChangeSubjectIds(ids);
   }
 
   function pickHit(hit: SubjectSearchHit) {
-    addSubject(hit.subject.id);
-    setSearch("");
-    setSearchFocused(false);
+    // Don't clear the search or unfocus the input — investigators frequently
+    // pick several subjects matching the same word ("military" → Military
+    // sites, Checkpoints, Fortifications), and resetting after each click
+    // forces them to retype. Toggling an already-added hit removes it,
+    // mirroring the chip's × so the user can correct a wrong pick from the
+    // same dropdown.
+    toggleSubject(hit.subject.id);
   }
 
-  const showDropdown = (searchFocused || trimmed.length > 0) && hits.length > 0;
-  const hasSelection = selectedSubjects.length > 0;
+  function pickOsmHit(hit: OsmTagHit) {
+    // Same multi-pick behaviour as pickHit — keep the search live so the
+    // investigator can grab several OSM tags ("bench", "picnic_table",
+    // "trash") from one search.
+    toggleCustomTag(hit.entry.key, hit.entry.value);
+  }
+
+  const totalHits = curatedHits.length + osmHits.length;
+  const showDropdown = (searchFocused || trimmed.length > 0) && totalHits > 0;
 
   return (
     <div className="space-y-4">
@@ -134,52 +200,104 @@ export function QueryBuilder({
           aria-expanded={showDropdown}
         />
         {showDropdown && (
-          <ul
-            role="listbox"
-            className="absolute left-0 right-0 top-full z-20 mt-1 max-h-72 overflow-y-auto rounded-md border border-[var(--color-line)] bg-[var(--color-surface-raised)] shadow-[0_8px_24px_-8px_rgba(26,23,20,0.25)]"
+          <div
+            className="absolute left-0 right-0 top-full z-20 mt-1 max-h-96 overflow-y-auto rounded-md border border-[var(--color-line)] bg-[var(--color-surface-raised)] shadow-[0_8px_24px_-8px_rgba(26,23,20,0.25)]"
           >
-            {hits.map((hit) => {
-              const already = selectedSet.has(hit.subject.id);
-              return (
-                <li key={hit.subject.id} role="option" aria-selected={already}>
-                  <button
-                    type="button"
-                    onClick={() => pickHit(hit)}
-                    disabled={already}
-                    className={[
-                      "flex w-full items-center gap-2 px-3 py-2 text-left",
-                      already
-                        ? "cursor-not-allowed opacity-60"
-                        : "hover:bg-[var(--color-surface-sunken)] focus:bg-[var(--color-surface-sunken)] focus:outline-none",
-                    ].join(" ")}
-                  >
-                    <span aria-hidden className="text-base leading-none">
-                      {hit.subject.icon}
-                    </span>
-                    <span className="flex min-w-0 flex-1 flex-col">
-                      <span className="truncate text-sm text-[var(--color-ink)]">
-                        {hit.subject.label}
-                      </span>
-                      <span className="truncate text-[11px] text-[var(--color-ink-faint)]">
-                        {hit.matchedField === "tag" ? (
-                          <span className="font-[var(--font-mono)]">
-                            {hit.matchedText}
+            {curatedHits.length > 0 && (
+              <>
+                <DropdownEyebrow>HR-curated</DropdownEyebrow>
+                <ul role="listbox">
+                  {curatedHits.map((hit) => {
+                    const already = selectedSet.has(hit.subject.id);
+                    return (
+                      <li key={hit.subject.id} role="option" aria-selected={already}>
+                        <button
+                          type="button"
+                          onClick={() => pickHit(hit)}
+                          className={[
+                            "flex w-full items-center gap-2 px-3 py-2 text-left",
+                            "hover:bg-[var(--color-surface-sunken)] focus:bg-[var(--color-surface-sunken)] focus:outline-none",
+                            already && "bg-[var(--color-surface-sunken)]/40",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                          aria-label={already ? `Remove ${hit.subject.label}` : `Add ${hit.subject.label}`}
+                        >
+                          <span aria-hidden className="text-base leading-none">
+                            {hit.subject.icon}
                           </span>
-                        ) : (
-                          <span style={{ fontWeight: 600 }}>{hit.matchedText}</span>
-                        )}
-                      </span>
-                    </span>
-                    {already && (
-                      <span className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">
-                        Added
-                      </span>
-                    )}
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
+                          <span className="flex min-w-0 flex-1 flex-col">
+                            <span className="truncate text-sm text-[var(--color-ink)]">
+                              {hit.subject.label}
+                            </span>
+                            <span className="truncate text-[11px] text-[var(--color-ink-faint)]">
+                              {hit.matchedField === "tag" ? (
+                                <span className="font-[var(--font-mono)]">
+                                  {hit.matchedText}
+                                </span>
+                              ) : (
+                                <span style={{ fontWeight: 600 }}>{hit.matchedText}</span>
+                              )}
+                            </span>
+                          </span>
+                          {already && (
+                            <span className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">
+                              Added
+                            </span>
+                          )}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
+
+            {osmHits.length > 0 && (
+              <>
+                <DropdownEyebrow>All OSM tags</DropdownEyebrow>
+                <ul role="listbox">
+                  {osmHits.map((hit) => {
+                    const tk = `${hit.entry.key}=${hit.entry.value}`;
+                    const already = customTagKeySet.has(tk);
+                    return (
+                      <li key={tk} role="option" aria-selected={already}>
+                        <button
+                          type="button"
+                          onClick={() => pickOsmHit(hit)}
+                          className={[
+                            "flex w-full items-center gap-2 px-3 py-2 text-left",
+                            "hover:bg-[var(--color-surface-sunken)] focus:bg-[var(--color-surface-sunken)] focus:outline-none",
+                            already && "bg-[var(--color-surface-sunken)]/40",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                          aria-label={already ? `Remove ${tk}` : `Add ${tk}`}
+                        >
+                          <span className="flex min-w-0 flex-1 flex-col">
+                            <span className="truncate font-[var(--font-mono)] text-[12px] text-[var(--color-ink)]">
+                              <span className="text-[var(--color-ink-faint)]">
+                                {hit.entry.key}=
+                              </span>
+                              {hit.entry.value}
+                            </span>
+                            <span className="text-[10px] text-[var(--color-ink-faint)]">
+                              used {formatCount(hit.entry.count)} times on OSM
+                            </span>
+                          </span>
+                          {already && (
+                            <span className="text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)]">
+                              Added
+                            </span>
+                          )}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
+          </div>
         )}
       </div>
 
@@ -200,6 +318,13 @@ export function QueryBuilder({
               subject={subject}
               glossaryEntries={glossaryEntries}
               onRemove={() => removeSubject(subject.id)}
+            />
+          ))}
+          {customTags.map((tag) => (
+            <CustomTagChip
+              key={tagKey(tag)}
+              tag={tag}
+              onRemove={() => toggleCustomTag(tag.key, tag.value)}
             />
           ))}
         </div>
@@ -253,16 +378,76 @@ export function QueryBuilder({
         </Button>
       )}
 
+      {/* Generated-query disclosure — collapsed by default. The chevron and
+          eyebrow style mirror the rest of the editor; the body is the same
+          monospaced QL the Raw-mode textarea would emit. Provides a
+          learn-while-you-build affordance without intimidating users who
+          don't care about syntax. */}
+      {hasSelection && (
+        <div className="rounded-md border border-[var(--color-line)] bg-[var(--color-surface-sunken)]">
+          <button
+            type="button"
+            onClick={() => setShowGeneratedQL((v) => !v)}
+            aria-expanded={showGeneratedQL}
+            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition-colors hover:bg-[var(--color-surface-sunken)]/60"
+          >
+            <span className="flex items-center gap-2">
+              <span
+                className="uppercase text-[var(--color-ink-faint)]"
+                style={{ fontSize: "10px", letterSpacing: "0.22em", fontWeight: 600 }}
+              >
+                Generated query
+              </span>
+              <span className="text-[10px] text-[var(--color-ink-faint)]">
+                ({generatedQL.split("\n").length} lines)
+              </span>
+            </span>
+            <span aria-hidden className="text-[11px] text-[var(--color-ink-faint)]">
+              {showGeneratedQL ? "▴" : "▾"}
+            </span>
+          </button>
+          {showGeneratedQL && (
+            <div className="border-t border-[var(--color-line)] px-3 py-2.5">
+              <pre className="overflow-x-auto whitespace-pre rounded bg-[var(--color-surface-raised)] px-2.5 py-2 font-[var(--font-mono)] text-[11px] leading-relaxed text-[var(--color-ink)]">
+                {generatedQL}
+              </pre>
+              <p className="mt-1.5 text-[10px] italic text-[var(--color-ink-faint)]">
+                This is what runs against overpass-api.de when you hit Run.{" "}
+                <code className="font-[var(--font-mono)]">{"{{bbox}}"}</code>{" "}
+                gets substituted with your selected region.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       <SubjectPicker
         open={pickerOpen}
         onClose={() => setPickerOpen(false)}
-        glossaryEntries={glossaryEntries}
         selectedIds={selectedSubjectIds}
-        onToggle={toggleSubject}
-        onOpenTagLibrary={onOpenTagLibrary}
+        onToggleSubject={toggleSubject}
       />
-
-      {/* TODO: Advanced disclosure (raw-QL escape hatch) deferred to a future iteration. */}
     </div>
   );
+}
+
+function tagKey(t: CustomTag): string {
+  return t.value === null ? t.key : `${t.key}=${t.value}`;
+}
+
+function DropdownEyebrow({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      className="border-b border-[var(--color-line)] bg-[var(--color-surface-sunken)] px-3 py-1 uppercase text-[var(--color-ink-faint)]"
+      style={{ fontSize: "9px", letterSpacing: "0.22em", fontWeight: 600 }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function formatCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
+  return n.toLocaleString();
 }
