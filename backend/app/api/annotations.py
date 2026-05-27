@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +14,51 @@ from app.db.session import get_session
 from .schemas import AnnotationUpdate, OverrideUpdate
 
 router = APIRouter(prefix="/projects/{project_id}/source-files/{source_file_id}", tags=["annotations"])
+
+# Annotation keys whose value is rendered as a clickable link in the exported
+# KML balloon HTML. Their values must be validated against a safe-URL allowlist
+# so a malicious `javascript:` href can't ride an exported KML into a browser
+# preview, Google My Maps re-import, or any other tool that renders HTML
+# anchors (Earth Pro itself doesn't execute JS, but the exported file is no
+# longer under our control).
+_URL_ANNOTATION_KEYS = frozenset({"source", "source_url", "link"})
+_SAFE_URL_SCHEMES = frozenset({"http", "https", "mailto"})
+
+# Individual annotation values are user-supplied text that ends up in the DB
+# (LargeBinary parsed_cache + a TEXT fields column) and in every export. A
+# multi-MB note bloats SQLite and every subsequent export — cap it at
+# something generous-but-bounded.
+_MAX_FIELD_LENGTH = 8_000
+
+
+def _validate_annotations(fields: dict[str, str]) -> None:
+    """Reject obviously unsafe annotation payloads with a 400."""
+    for key, value in fields.items():
+        if len(value) > _MAX_FIELD_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"annotation {key!r} is too long "
+                    f"({len(value)} chars; max {_MAX_FIELD_LENGTH})"
+                ),
+            )
+        if key.lower() in _URL_ANNOTATION_KEYS or key.lower().endswith("_url"):
+            try:
+                parsed = urlparse(value)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"annotation {key!r} is not a parseable URL: {exc}",
+                ) from exc
+            # Empty url → empty annotation, already filtered by the caller.
+            if parsed.scheme and parsed.scheme.lower() not in _SAFE_URL_SCHEMES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"annotation {key!r} uses scheme {parsed.scheme!r}; "
+                        f"only {sorted(_SAFE_URL_SCHEMES)} are allowed"
+                    ),
+                )
 
 
 def _verify_source_file(session: Session, project_id: int, source_file_id: int) -> SourceFile:
@@ -35,6 +82,7 @@ def upsert_annotations(
 ) -> dict[str, str]:
     sf = _verify_source_file(session, project_id, source_file_id)
     cleaned = {k: v for k, v in req.fields.items() if v != ""}
+    _validate_annotations(cleaned)
 
     existing = session.execute(
         select(PlacemarkAnnotation).where(
