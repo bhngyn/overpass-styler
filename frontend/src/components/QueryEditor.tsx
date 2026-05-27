@@ -225,6 +225,12 @@ export function QueryEditor({
           placeholder="[out:json][timeout:25];&#10;nwr[&quot;amenity&quot;=&quot;prison&quot;]({{bbox}});&#10;out body geom;"
           className="block w-full rounded-md border border-[var(--color-line)] bg-[var(--color-surface-raised)] px-2.5 py-2 font-[var(--font-mono)] text-[12px] leading-relaxed text-[var(--color-ink)] focus:border-[var(--color-accent)] focus:outline-none"
           style={{ tabSize: 2 }}
+          // Marks this textarea as a valid Tag Library insertion target.
+          // ProjectWorkspace's drawer uses this to find the most recently
+          // touched QL editor instead of relying on `document.activeElement`,
+          // which is null in Safari/Firefox by the time the drawer button
+          // click fires. See D2 review #2 / D3 review #1b.
+          data-tag-insert-target="true"
         />
         <p className="mt-1 text-[10px] text-[var(--color-ink-faint)]">
           Use <code className="font-[var(--font-mono)]">{"{{bbox}}"}</code> as a

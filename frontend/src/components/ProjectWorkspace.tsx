@@ -85,22 +85,64 @@ export function ProjectWorkspace() {
   // most one QueryEditor textarea on screen when the drawer is open — its
   // DOM identity is unambiguous via the captured ref.
   //
-  // TODO(Phase C): If a stricter contract is needed, replace this with a
-  // React context (`TagInsertContext`) read by QueryEditor.
+  // We track the insert target via a document-level focus/click listener
+  // that records every textarea tagged ``data-tag-insert-target="true"`` as
+  // it receives focus. Reading ``document.activeElement`` at button-click
+  // time (the previous implementation) was brittle: Chromium moves focus to
+  // the button mid-click, and Safari/Firefox never focus buttons at all, so
+  // the ref captured was often null. With the listener pattern, opening
+  // the drawer from a touch user / a stale page state still finds the most
+  // recently used QL editor. D2 review #2 / D3 review #1b.
   const [tagLibOpen, setTagLibOpen] = useState(false);
+  const [tagLibInsertError, setTagLibInsertError] = useState<string | null>(null);
   const insertTargetRef = useRef<HTMLTextAreaElement | null>(null);
-  const openTagLibrary = useCallback(() => {
-    // Capture whatever textarea is focused right now — typically the QL
-    // textarea that the user just typed into / clicked "Tag Library" from.
-    const active = typeof document !== "undefined" ? document.activeElement : null;
-    if (active instanceof HTMLTextAreaElement) {
-      insertTargetRef.current = active;
+
+  useEffect(() => {
+    function trackTouch(e: Event) {
+      const el = e.target;
+      if (
+        el instanceof HTMLTextAreaElement &&
+        el.dataset.tagInsertTarget === "true"
+      ) {
+        insertTargetRef.current = el;
+      }
     }
+    // focusin bubbles (unlike focus); pointerdown covers touch interactions
+    // that don't immediately move keyboard focus.
+    document.addEventListener("focusin", trackTouch, true);
+    document.addEventListener("pointerdown", trackTouch, true);
+    return () => {
+      document.removeEventListener("focusin", trackTouch, true);
+      document.removeEventListener("pointerdown", trackTouch, true);
+    };
+  }, []);
+
+  const openTagLibrary = useCallback(() => {
+    // Fallback: if no textarea has been touched yet (e.g. investigator
+    // opened a fresh draft and immediately clicked "Tag Library"), grab
+    // the only visible tag-insert target — DOM-unique by design.
+    if (!insertTargetRef.current) {
+      const found = document.querySelector<HTMLTextAreaElement>(
+        'textarea[data-tag-insert-target="true"]',
+      );
+      if (found) insertTargetRef.current = found;
+    }
+    setTagLibInsertError(null);
     setTagLibOpen(true);
   }, []);
   const onInsertFromDrawer = useCallback((clause: string) => {
     const ta = insertTargetRef.current;
-    if (!ta) return;
+    if (!ta || !ta.isConnected) {
+      // Drawer was opened from somewhere that never had a target (e.g. a
+      // future caller outside QueryEditor) or the textarea unmounted while
+      // the drawer was open (step switch). Tell the user instead of
+      // silently swallowing.
+      setTagLibInsertError(
+        "No active query editor to insert into. Open a Compose draft and click into the query text first.",
+      );
+      return;
+    }
+    setTagLibInsertError(null);
     const start = ta.selectionStart ?? ta.value.length;
     const end = ta.selectionEnd ?? ta.value.length;
     const before = ta.value.slice(0, start);
@@ -262,9 +304,30 @@ export function ProjectWorkspace() {
       {/* Tag Library drawer — always mounted, animates open/closed. */}
       <TagLibraryDrawer
         open={tagLibOpen}
-        onClose={() => setTagLibOpen(false)}
+        onClose={() => {
+          setTagLibOpen(false);
+          setTagLibInsertError(null);
+        }}
         onInsert={onInsertFromDrawer}
       />
+
+      {/* Surface insertion failures (no active target) as a transient toast
+          so investigators don't quietly lose their click. Auto-dismisses. */}
+      {tagLibInsertError && (
+        <div
+          role="alert"
+          className="fixed bottom-6 right-6 z-50 max-w-md rounded-md border border-[var(--color-warning)]/40 bg-[var(--paper-warm)] px-4 py-3 text-sm text-[var(--ink-dark)] shadow-lg"
+        >
+          {tagLibInsertError}
+          <button
+            type="button"
+            onClick={() => setTagLibInsertError(null)}
+            className="ml-3 text-xs underline opacity-70 hover:opacity-100"
+          >
+            dismiss
+          </button>
+        </div>
+      )}
     </div>
   );
 }
