@@ -1,5 +1,7 @@
+import { useMemo, useState } from "react";
 import { useProjectStore } from "@/stores/project";
 import { rgbaToCss } from "@/lib/kmlColor";
+import type { SourceFileDetail } from "@/lib/types";
 
 /** Where this legend instance is being mounted. The same component serves
  * two roles:
@@ -26,18 +28,42 @@ interface LegendProps {
   onToggle?: () => void;
 }
 
+/** Compound key for the expand-state Set — needs both source file id and
+ * category value so the same category value in two different source files
+ * expands independently. */
+function expandKey(sourceFileId: number, value: string): string {
+  return `${sourceFileId}|${value}`;
+}
+
 /** Legend — lists every category visible in the project with its swatch and
  * feature count. Click a row to toggle that category's visibility on the
  * map. Used both as the floating chip on the map (Step 2 — Style) and as
- * the left-rail diagnostic in Step 3 — Review. */
+ * the left-rail diagnostic in Step 3 — Review.
+ *
+ * In `rail` placement, each category row carries an expand chevron that
+ * reveals the placemark list inside that category — Review step uses this
+ * to preflight individual features without leaving the legend. */
 export function MapLegend({ placement, collapsed = false, onToggle }: LegendProps) {
   const proj = useProjectStore((s) => s.currentProject);
   const sourceFiles = useProjectStore((s) => s.sourceFiles);
+  const selection = useProjectStore((s) => s.selection);
   const hiddenCategories = useProjectStore((s) => s.hiddenCategories);
   const hiddenSourceFiles = useProjectStore((s) => s.hiddenSourceFiles);
   const toggleCategoryVisible = useProjectStore((s) => s.toggleCategoryVisible);
   const styleForCategory = useProjectStore((s) => s.styleForCategory);
   const setSelection = useProjectStore((s) => s.setSelection);
+  /** Rail-only: which (source-file, category) rows are expanded to show
+   * their placemarks. Kept in component state — view concern only. */
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleExpanded = (sourceFileId: number, value: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      const k = expandKey(sourceFileId, value);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+  };
 
   if (!proj) return null;
 
@@ -63,40 +89,58 @@ export function MapLegend({ placement, collapsed = false, onToggle }: LegendProp
   if (placement === "rail") {
     return (
       <div className="space-y-3">
-        {groups.map(({ sf, entries, hidden }) => (
-          <div key={sf.id} className="space-y-1">
-            <div
-              className={[
-                "truncate text-[11px] font-medium text-[var(--color-ink-soft)]",
-                hidden ? "opacity-50" : "",
-              ].join(" ")}
-              title={sf.filename}
-            >
-              {sf.filename}
+        {groups.map(({ sf, entries, hidden }) => {
+          const detail = sourceFiles[sf.id];
+          return (
+            <div key={sf.id} className="space-y-1">
+              <div
+                className={[
+                  "truncate text-[11px] font-medium text-[var(--color-ink-soft)]",
+                  hidden ? "opacity-50" : "",
+                ].join(" ")}
+                title={sf.filename}
+              >
+                {sf.filename}
+              </div>
+              <div className="space-y-0.5">
+                {entries.map(([value, count]) => {
+                  const isExpanded = expanded.has(expandKey(sf.id, value));
+                  return (
+                    <div key={value}>
+                      <LegendRow
+                        sourceFileId={sf.id}
+                        value={value}
+                        count={count}
+                        hidden={hidden || hiddenCategories.has(value)}
+                        variant="rail"
+                        expandable
+                        isExpanded={isExpanded}
+                        onToggleExpanded={() => toggleExpanded(sf.id, value)}
+                        onToggleVisible={() => toggleCategoryVisible(value)}
+                        onSelect={() =>
+                          setSelection({
+                            kind: "category",
+                            sourceFileId: sf.id,
+                            categoryValue: value,
+                          })
+                        }
+                        styleForCategory={styleForCategory}
+                      />
+                      {isExpanded && detail && (
+                        <RailPlacemarkList
+                          detail={detail}
+                          categoryValue={value}
+                          selection={selection}
+                          onSelect={setSelection}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-            <div className="space-y-0.5">
-              {entries.map(([value, count]) => (
-                <LegendRow
-                  key={value}
-                  sourceFileId={sf.id}
-                  value={value}
-                  count={count}
-                  hidden={hidden || hiddenCategories.has(value)}
-                  variant="rail"
-                  onToggleVisible={() => toggleCategoryVisible(value)}
-                  onSelect={() =>
-                    setSelection({
-                      kind: "category",
-                      sourceFileId: sf.id,
-                      categoryValue: value,
-                    })
-                  }
-                  styleForCategory={styleForCategory}
-                />
-              ))}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     );
   }
@@ -162,6 +206,11 @@ interface LegendRowProps {
    * to (thicker outline, larger point). */
   onSelect?: () => void;
   styleForCategory: (value: string) => import("@/lib/types").FeatureStyle;
+  /** Rail-only: when true, prepend a chevron toggle that expands a
+   * placemark list under this row. The parent owns the open/closed state. */
+  expandable?: boolean;
+  isExpanded?: boolean;
+  onToggleExpanded?: () => void;
 }
 
 function LegendRow({
@@ -173,6 +222,9 @@ function LegendRow({
   onToggleVisible,
   onSelect,
   styleForCategory,
+  expandable = false,
+  isExpanded = false,
+  onToggleExpanded,
 }: LegendRowProps) {
   const style = styleForCategory(value);
   const fill = rgbaToCss(style.polygon.fill_color);
@@ -220,10 +272,22 @@ function LegendRow({
   return (
     <div
       className={[
-        "group flex w-full items-center gap-2 rounded px-1.5 py-1 text-left",
+        "group flex w-full items-center gap-1 rounded px-1.5 py-1 text-left",
         "hover:bg-[var(--color-surface-sunken)]",
       ].join(" ")}
     >
+      {expandable && (
+        <button
+          type="button"
+          onClick={onToggleExpanded}
+          title={isExpanded ? `Hide placemarks in ${value}` : `Show placemarks in ${value}`}
+          aria-label={isExpanded ? `Collapse ${value}` : `Expand ${value}`}
+          aria-expanded={isExpanded}
+          className="w-3 shrink-0 text-[10px] text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]"
+        >
+          {isExpanded ? "▾" : "▸"}
+        </button>
+      )}
       <button
         type="button"
         onClick={onSelect}
@@ -274,6 +338,98 @@ function LegendRow({
         {hidden ? <EyeOffIcon /> : <EyeIcon />}
       </button>
     </div>
+  );
+}
+
+/** Placemark roster shown inline under an expanded category row in the
+ * Review-step rail. Mirrors the visual rhythm of ProjectTree's
+ * `PlacemarkList` so users moving between Compose/Style and Review see the
+ * same affordances. Clicking a placemark routes through the existing
+ * selection flow — the map flies to it and the right-rail balloon preview
+ * updates. */
+function RailPlacemarkList({
+  detail,
+  categoryValue,
+  selection,
+  onSelect,
+}: {
+  detail: SourceFileDetail;
+  categoryValue: string;
+  selection: ReturnType<typeof useProjectStore.getState>["selection"];
+  onSelect: ReturnType<typeof useProjectStore.getState>["setSelection"];
+}) {
+  const items = useMemo(
+    () =>
+      detail.placemarks
+        .filter((p) => p.category_value === categoryValue)
+        .sort((a, b) => a.index - b.index),
+    [detail.placemarks, categoryValue],
+  );
+  if (items.length === 0) {
+    return (
+      <p className="ml-5 mt-0.5 py-1 text-[11px] italic text-[var(--color-ink-faint)]">
+        No placemarks in this category.
+      </p>
+    );
+  }
+  return (
+    <ul className="ml-3 mt-0.5 max-h-60 space-y-0.5 overflow-y-auto border-l border-[var(--color-line)] pl-2">
+      {items.map((p) => {
+        const isSelected =
+          selection.kind === "placemark" &&
+          selection.sourceFileId === detail.id &&
+          selection.placemarkIndex === p.index;
+        // Prefer the placemark's own name; fall back through localised
+        // OSM name tags before showing the raw index. Matches ProjectTree.
+        const label =
+          p.name?.trim() ||
+          p.extended_data["name:en"]?.trim() ||
+          p.extended_data["name:fr"]?.trim() ||
+          p.extended_data["name:ar"]?.trim() ||
+          `#${p.index}`;
+        return (
+          <li key={p.index}>
+            <button
+              type="button"
+              onClick={() =>
+                onSelect({
+                  kind: "placemark",
+                  sourceFileId: detail.id,
+                  placemarkIndex: p.index,
+                })
+              }
+              className={[
+                "flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-[11px]",
+                isSelected
+                  ? "bg-[var(--color-accent-soft)] text-[var(--color-ink)]"
+                  : "text-[var(--color-ink-soft)] hover:bg-[var(--color-surface-raised)]",
+              ].join(" ")}
+            >
+              <span className="truncate">{label}</span>
+              {p.has_override && (
+                <span
+                  title="Has per-placemark style override"
+                  className="ml-auto text-[10px] text-[var(--color-accent)]"
+                >
+                  ⚑
+                </span>
+              )}
+              {Object.keys(p.annotations).length > 0 && (
+                <span
+                  title="Has annotations"
+                  className={[
+                    "text-[10px] text-[var(--color-success)]",
+                    p.has_override ? "" : "ml-auto",
+                  ].join(" ")}
+                >
+                  ✎
+                </span>
+              )}
+            </button>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
