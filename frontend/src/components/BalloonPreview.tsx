@@ -47,12 +47,17 @@ const DEFAULT_OSM_TAG_KEYS = [
 
 /** Investigator annotation keys, in the same canonical order as the export
  * balloon. Any annotation present on the placemark whose key isn't in this
- * list is appended in insertion order. */
+ * list is appended in insertion order.
+ *
+ * Mirror of backend `DEFAULT_ANNOTATION_KEYS` (serialize.py) and the inspector
+ * `ANNOTATION_FIELDS` (PlacemarkInspector.tsx). Drift between any of the three
+ * silently loses investigator data in Earth Pro popups. */
 const DEFAULT_ANNOTATION_KEYS = [
-  "source_url",
-  "date",
-  "confidence",
   "note",
+  "source_url",
+  "date_observed",
+  "confidence",
+  "field_notes",
 ] as const;
 
 export function BalloonPreview({
@@ -258,8 +263,10 @@ function humanizeKey(key: string): string {
     source_url: "Source",
     source: "Source",
     date: "Date",
+    date_observed: "Date observed",
     confidence: "Confidence",
     note: "Note",
+    field_notes: "Field notes",
     "name:en": "Name (en)",
     "addr:city": "City",
     "addr:country": "Country",

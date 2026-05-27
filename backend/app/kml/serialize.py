@@ -38,8 +38,17 @@ from .parse import KML_NS, ParsedKml, Placemark
 from .style import FeatureStyle
 
 # Default investigator annotation fields surfaced in the Evidence section of
-# every balloon. Keep in sync with the frontend PlacemarkInspector.
-DEFAULT_ANNOTATION_KEYS: tuple[str, ...] = ("source_url", "date", "confidence", "note")
+# every balloon. Keep in sync with the frontend PlacemarkInspector — the
+# field names here are the literal `hr:*` ExtendedData keys, so a drift
+# between this tuple and the inspector means investigators silently lose
+# data in Earth Pro popups.
+DEFAULT_ANNOTATION_KEYS: tuple[str, ...] = (
+    "note",
+    "source_url",
+    "date_observed",
+    "confidence",
+    "field_notes",
+)
 
 # User-annotation namespace prefix on ExtendedData Data names. Keeps OSM tags and
 # investigator-added fields visually separated in Earth Pro popups.

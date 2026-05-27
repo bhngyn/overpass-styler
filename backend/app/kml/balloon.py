@@ -128,9 +128,12 @@ def _humanize_key(key: str) -> str:
     overrides = {
         "source_url": "Source",
         "source": "Source",
+        "source_url": "Source",
         "date": "Date",
+        "date_observed": "Date observed",
         "confidence": "Confidence",
         "note": "Note",
+        "field_notes": "Field notes",
         "name:en": "Name (en)",
         "addr:city": "City",
         "addr:country": "Country",
