@@ -22,7 +22,10 @@ function fetchIcons(): Promise<IconCatalogue> {
 }
 
 // Human-readable tab labels. Keys not in this map fall back to the raw group key.
+// Order here is informational only — actual tab order comes from the backend
+// catalogue, which puts `atrocity` first.
 const GROUP_LABELS: Record<string, string> = {
+  atrocity: "Atrocity investigations",
   hr: "Human rights",
   paddle: "Paddles",
   shapes: "Shapes",
@@ -32,7 +35,30 @@ const GROUP_LABELS: Record<string, string> = {
   pal5: "Palette 5",
 };
 
-const FALLBACK_TAB = "hr";
+// Subgroup labels for the atrocity palette. These are passed through from the
+// backend as-is; the map exists to let us localise / rename without touching
+// the Python source if we want to.
+const ATROCITY_SUBGROUP_LABELS: Record<string, string> = {
+  Detention: "Detention",
+  Mortality: "Mortality",
+  Destruction: "Destruction",
+  Military: "Military",
+  Displacement: "Displacement",
+  Civilian: "Civilian objects",
+  Evidence: "Evidence",
+};
+
+const FALLBACK_TAB = "atrocity";
+
+// Groups whose icons are white silhouettes on transparent — they need a dark
+// backdrop cell to be visible in the picker grid and chip.
+const BUNDLED_WHITE_GROUPS = new Set(["atrocity", "hr"]);
+
+function isBundledWhiteHref(href: string): boolean {
+  return (
+    href.startsWith("/api/icons/atrocity/") || href.startsWith("/api/icons/hr/")
+  );
+}
 
 function groupBySubgroup(icons: IconRecord[]): Array<{ subgroup: string | null; icons: IconRecord[] }> {
   const blocks: Array<{ subgroup: string | null; icons: IconRecord[] }> = [];
@@ -51,7 +77,16 @@ function groupBySubgroup(icons: IconRecord[]): Array<{ subgroup: string | null; 
 function readableHref(href: string): string {
   return href
     .replace("http://maps.google.com/mapfiles/kml/", "")
+    .replace("/api/icons/atrocity/", "")
     .replace("/api/icons/hr/", "");
+}
+
+function subgroupLabel(activeTab: string, subgroup: string | null): string | null {
+  if (!subgroup) return null;
+  if (activeTab === "atrocity") {
+    return ATROCITY_SUBGROUP_LABELS[subgroup] ?? subgroup;
+  }
+  return subgroup;
 }
 
 export function IconPicker({ value, onChange }: Props) {
@@ -69,9 +104,10 @@ export function IconPicker({ value, onChange }: Props) {
     () => (cat ? groupBySubgroup(cat[activeTab] ?? []) : []),
     [cat, activeTab],
   );
-  // White-silhouette HR icons need a dark backdrop to be visible in the
-  // selected-icon chip — Google's coloured icons sit better on light.
-  const valueIsHr = value.startsWith("/api/icons/hr/");
+  // White-silhouette bundled icons (atrocity + HR) need a dark backdrop to be
+  // visible in the selected-icon chip — Google's coloured icons sit better on
+  // light.
+  const valueIsBundled = isBundledWhiteHref(value);
 
   return (
     <div className="space-y-1.5">
@@ -91,7 +127,7 @@ export function IconPicker({ value, onChange }: Props) {
         <span
           className={[
             "flex h-7 w-7 shrink-0 items-center justify-center rounded",
-            valueIsHr ? "bg-[var(--color-ink)]" : "bg-[var(--color-surface)]",
+            valueIsBundled ? "bg-[var(--color-ink)]" : "bg-[var(--color-surface)]",
           ].join(" ")}
         >
           <img src={value} alt="" className="h-5 w-5 object-contain" />
@@ -121,19 +157,22 @@ export function IconPicker({ value, onChange }: Props) {
             ))}
           </div>
           <div className="max-h-64 space-y-2 overflow-y-auto">
-            {blocks.map((block, i) => (
+            {blocks.map((block, i) => {
+              const label = subgroupLabel(activeTab, block.subgroup);
+              return (
               <div key={`${block.subgroup ?? "default"}-${i}`}>
-                {block.subgroup && (
+                {label && (
                   <div className="mb-1 mt-0.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-ink-faint)]">
-                    {block.subgroup}
+                    {label}
                   </div>
                 )}
                 <div className="grid grid-cols-8 gap-1">
                   {block.icons.map((icon) => {
-                    // HR icons are white silhouettes — they need a dark cell
-                    // to be visible. Google's stock icons are coloured raster
-                    // and read better on a light cell.
-                    const darkCell = activeTab === "hr";
+                    // Bundled icons (atrocity + HR) are white silhouettes —
+                    // they need a dark cell to be visible. Google's stock
+                    // icons are coloured raster and read better on a light
+                    // cell.
+                    const darkCell = BUNDLED_WHITE_GROUPS.has(activeTab);
                     return (
                       <button
                         type="button"
@@ -159,7 +198,8 @@ export function IconPicker({ value, onChange }: Props) {
                   })}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

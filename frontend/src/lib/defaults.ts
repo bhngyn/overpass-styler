@@ -1,10 +1,12 @@
 import type { FeatureStyle } from "./types";
 
-export const DEFAULT_ICON_HREF = "http://maps.google.com/mapfiles/kml/paddle/ylw-blank.png";
+/** Default icon href: the neutral incident pin from the atrocity palette.
+ * Distinct enough to read on any basemap; symbolic rather than literal. */
+export const DEFAULT_ICON_HREF = "/api/icons/atrocity/incident-marker.png";
 
 /** Sensible starting style for a new category — semi-transparent grey fill, solid
- * outline, yellow paddle. Distinct enough to see on the map; quiet enough not to
- * feel decided before the investigator has tweaked it. */
+ * outline, neutral incident-marker icon. Distinct enough to see on the map;
+ * quiet enough not to feel decided before the investigator has tweaked it. */
 export const defaultFeatureStyle = (): FeatureStyle => ({
   polygon: {
     fill: true,
@@ -36,4 +38,18 @@ export const STARTER_PALETTE: ReadonlyArray<[string, string]> = [
   ["blue", "#2f4f8a"],
   ["purple", "#5e3a82"],
   ["graphite", "#3a3a3a"],
+];
+
+/** Curated starter icons from the atrocity palette — surfaced as quick-pick
+ * shortcuts elsewhere in the UI so investigators don't have to open the full
+ * picker for the eight most common categories. */
+export const STARTER_ICON_HREFS: ReadonlyArray<string> = [
+  "/api/icons/atrocity/detention-facility.png",
+  "/api/icons/atrocity/mass-grave.png",
+  "/api/icons/atrocity/destroyed-building.png",
+  "/api/icons/atrocity/hospital.png",
+  "/api/icons/atrocity/school.png",
+  "/api/icons/atrocity/religious-site.png",
+  "/api/icons/atrocity/witness.png",
+  "/api/icons/atrocity/incident-marker.png",
 ];
