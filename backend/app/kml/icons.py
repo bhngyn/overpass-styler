@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .atrocity_icons import ATROCITY_ICONS, ATROCITY_HREF_PREFIX
 from .hr_icons import HR_ICONS, HR_HREF_PREFIX
 
 _BASE = "http://maps.google.com/mapfiles/kml/"
@@ -77,9 +78,23 @@ PAL3: tuple[Icon, ...] = tuple(_pal(3, i) for i in range(64))
 PAL4: tuple[Icon, ...] = tuple(_pal(4, i) for i in range(64))
 PAL5: tuple[Icon, ...] = tuple(_pal(5, i) for i in range(64))
 
+# Curated atrocity-investigations set — the default palette since v2. Same
+# white-silhouette + KML <IconStyle><color> contract as the older HR set.
+ATROCITY: tuple[Icon, ...] = tuple(
+    Icon(
+        id=a.id,
+        label=a.label,
+        href=f"{ATROCITY_HREF_PREFIX}{a.id}.png",
+        group="atrocity",
+        subgroup=a.subgroup,
+    )
+    for a in ATROCITY_ICONS
+)
+
 # Curated human-rights / OSINT set. White-silhouette PNGs bundled with the
 # backend; surfaced to the UI under /api/icons/hr/ and inlined as data: URIs
-# in exported KMLs.
+# in exported KMLs. Retained for back-compat with projects styled before the
+# atrocity palette landed.
 HR: tuple[Icon, ...] = tuple(
     Icon(
         id=h.id,
@@ -91,9 +106,11 @@ HR: tuple[Icon, ...] = tuple(
     for h in HR_ICONS
 )
 
-ALL_ICONS: tuple[Icon, ...] = HR + PADDLES + SHAPES + PAL2 + PAL3 + PAL4 + PAL5
+# Order matters — the frontend tab strip renders groups in this order, and we
+# want the atrocity palette to be the first/primary tab.
+ALL_ICONS: tuple[Icon, ...] = ATROCITY + HR + PADDLES + SHAPES + PAL2 + PAL3 + PAL4 + PAL5
 
-DEFAULT_ICON: Icon = next(i for i in PADDLES if i.id == "paddle-ylw")
+DEFAULT_ICON: Icon = next(i for i in ATROCITY if i.id == "incident-marker")
 
 _BY_ID: dict[str, Icon] = {i.id: i for i in ALL_ICONS}
 

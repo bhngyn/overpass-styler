@@ -24,7 +24,7 @@ class PolygonStyle:
 
 @dataclass
 class IconStyle:
-    icon_href: str = "http://maps.google.com/mapfiles/kml/paddle/ylw-blank.png"
+    icon_href: str = "/api/icons/atrocity/incident-marker.png"
     color: RGBA = field(default_factory=lambda: RGBA(255, 255, 255, 255))
     scale: float = 1.0
     heading: float = 0.0
