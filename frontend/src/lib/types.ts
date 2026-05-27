@@ -101,3 +101,90 @@ export interface IconRecord {
 }
 
 export type IconCatalogue = Record<string, IconRecord[]>;
+
+// ── Phase B4 (browse mode) ──
+// Mirror the Pydantic schemas in backend/app/api/browse.py. WSEN bbox tuple
+// is the lingua franca on the wire — convert to/from Overpass's SWNE token
+// only inside the backend client.
+
+/** [west, south, east, north] in EPSG:4326 degrees. */
+export type BrowseBbox = [number, number, number, number];
+
+export interface BrowseDomainTopTag {
+  key: string;
+  value: string;
+  count: number;
+}
+
+export interface BrowseDomainSummary {
+  name: string;
+  count: number;
+  top_tags: BrowseDomainTopTag[];
+}
+
+export interface BrowseInventorySummary {
+  bbox: BrowseBbox;
+  total_count: number;
+}
+
+/** `area_capped` toggles which of `domains` / `domain_counts` is populated.
+ * In the normal mode (`false`) the rail renders per-domain cards; in capped
+ * mode the rail shows a "narrow your area" hint with raw counts. */
+export interface BrowseInventoryResponse {
+  area_capped: boolean;
+  area_km2: number;
+  area_cap_km2: number;
+  total_count: number;
+  summary: BrowseInventorySummary | null;
+  domains: BrowseDomainSummary[] | null;
+  domain_counts: Record<string, number> | null;
+}
+
+export interface BrowseItemSummary {
+  osm_id: string;
+  name: string | null;
+  tags: Record<string, string>;
+  geometry_kind: string;
+  center: [number, number] | null;
+}
+
+export interface BrowseItemsResponse {
+  items: BrowseItemSummary[];
+  has_more: boolean;
+  next_offset: number;
+  total: number;
+}
+
+export interface BrowseWikiLink {
+  kind: string;
+  label: string;
+  url: string;
+}
+
+export interface BrowseFeatureGeometry {
+  kind: string;
+  point?: [number, number] | null;
+  coordinates?: [number, number][] | null;
+  members?: unknown[] | null;
+}
+
+export interface BrowseFeatureDetail {
+  osm_id: string;
+  name: string | null;
+  tags: Record<string, string>;
+  geometry: BrowseFeatureGeometry;
+  wiki_links: BrowseWikiLink[];
+}
+
+export interface BrowseBakeRequest {
+  project_id?: number | null;
+  name?: string | null;
+  bbox?: BrowseBbox | null;
+  query?: string | null;
+  single_osm_id?: string | null;
+}
+
+export interface BrowseBakeResponse {
+  project_id: number;
+  source_file: SourceFileSummary;
+}

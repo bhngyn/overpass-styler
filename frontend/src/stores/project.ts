@@ -4,6 +4,8 @@ import { defaultFeatureStyle } from "@/lib/defaults";
 import { hexRgbToRgba, opacityToAlpha } from "@/lib/kmlColor";
 import { DEFAULT_THEME_ID, colorAt, themeById, type Theme } from "@/lib/palettes";
 import type {
+  BrowseBakeRequest,
+  BrowseBakeResponse,
   FeatureStyle,
   PlacemarkPreview,
   ProjectDetail,
@@ -43,6 +45,12 @@ interface State {
   // Async status flags shared across components.
   busy: boolean;
   error: string | null;
+
+  // ── Phase B4 (browse mode) ──
+  /** Which top-level destination the app is showing. The picker is implicit
+   * (rendered whenever ``currentProjectId == null && mode === "project"``);
+   * ``"browse"`` parks the project (if any) and routes to BrowseMode. */
+  mode: "project" | "browse";
 }
 
 interface Actions {
@@ -82,6 +90,16 @@ interface Actions {
   applyTheme: (themeId: string) => Promise<void>;
 
   setError: (e: string | null) => void;
+
+  // ── Phase B4 (browse mode) ──
+  /** Switch destinations. Doesn't close the project — that's the point of the
+   * mode flag; ``"browse"`` parks the workflow so the back-arrow can restore
+   * it in O(1). */
+  setMode: (mode: "project" | "browse") => void;
+  /** Bake handoff from BrowseMode. If ``body.project_id`` is null the backend
+   * mints a fresh project; we then auto-open it and flip back to project mode
+   * so the investigator lands on the new layer. */
+  bakeFromBrowse: (body: BrowseBakeRequest) => Promise<BrowseBakeResponse>;
 }
 
 type Store = State & Actions;
@@ -137,6 +155,7 @@ export const useProjectStore = create<Store>((set, get) => ({
   themeId: DEFAULT_THEME_ID,
   busy: false,
   error: null,
+  mode: "project",
 
   setError: (error) => set({ error }),
 
@@ -351,6 +370,37 @@ export const useProjectStore = create<Store>((set, get) => ({
       set({ currentProject: latest });
     } catch (e) {
       set({ error: String(e) });
+    } finally {
+      set({ busy: false });
+    }
+  },
+
+  // ── Phase B4 (browse mode) ──
+  setMode(mode) {
+    set({ mode });
+  },
+
+  async bakeFromBrowse(body) {
+    set({ busy: true, error: null });
+    try {
+      const result = await api.browse.bake(body);
+      // Refresh the project list — a fresh project may have been minted, and
+      // the layer count on an existing project just changed.
+      try {
+        const projects = await api.listProjects();
+        set({ projects });
+      } catch {
+        /* non-fatal; the bake itself succeeded */
+      }
+      // Auto-open the destination project so the investigator lands on the
+      // baked layer. ``openProject`` handles selection + source-file detail
+      // fetching; we then flip back to project mode so the workspace renders.
+      await get().openProject(result.project_id);
+      set({ mode: "project" });
+      return result;
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
     } finally {
       set({ busy: false });
     }

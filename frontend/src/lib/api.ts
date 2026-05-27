@@ -1,4 +1,10 @@
 import type {
+  BrowseBakeRequest,
+  BrowseBakeResponse,
+  BrowseBbox,
+  BrowseFeatureDetail,
+  BrowseInventoryResponse,
+  BrowseItemsResponse,
   FeatureStyle,
   IconCatalogue,
   PresetSummary,
@@ -136,5 +142,35 @@ export const api = {
       ),
     search: (q: string) =>
       request<SearchResponse>(`/tag-library/search?q=${encodeURIComponent(q)}`),
+  },
+
+  // ── Phase B4 (browse mode) ──────────────────────────────────────────────
+  // Field-Atlas endpoints. ``inventory`` is the heavy hitter — a domain
+  // partition of every OSM feature inside the bbox; ``items`` is the
+  // drill-in list; ``item`` is full per-feature detail; ``bake`` is the
+  // handoff back into the project workflow.
+  browse: {
+    inventory: (bbox: BrowseBbox) =>
+      request<BrowseInventoryResponse>("/browse/inventory", {
+        method: "POST",
+        body: JSON.stringify({ bbox }),
+      }),
+    items: (bbox: BrowseBbox, key: string, value: string, offset = 0, limit = 200) => {
+      const q = new URLSearchParams({
+        bbox: bbox.join(","),
+        key,
+        value,
+        offset: String(offset),
+        limit: String(limit),
+      });
+      return request<BrowseItemsResponse>(`/browse/items?${q.toString()}`);
+    },
+    item: (osmId: string) =>
+      request<BrowseFeatureDetail>(`/browse/item?osm_id=${encodeURIComponent(osmId)}`),
+    bake: (body: BrowseBakeRequest) =>
+      request<BrowseBakeResponse>("/browse/bake", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
   },
 };
