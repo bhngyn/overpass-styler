@@ -14,7 +14,7 @@
  * Header always shows the area summary card: bbox size in km², total
  * feature count, and "fetched X minutes ago" timestamp.
  */
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
 import type {
   BrowseBbox,
@@ -452,7 +452,7 @@ function DrillInView({
   }, [items, search]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-line)] px-3 py-2">
         <button
           type="button"
@@ -475,48 +475,136 @@ function DrillInView({
           </code>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {error && (
-          <div className="p-3 text-sm text-[var(--color-danger)]">{error}</div>
-        )}
-        {!error && loading && items.length === 0 && (
-          <div className="p-3 text-sm italic text-[var(--color-ink-faint)]">Loading…</div>
-        )}
-        {!error && !loading && filtered.length === 0 && items.length > 0 && (
-          <div className="p-3 text-sm italic text-[var(--color-ink-faint)]">
-            No features match “{search}”.
-          </div>
-        )}
-        {!error && !loading && items.length === 0 && (
-          <div className="p-3 text-sm italic text-[var(--color-ink-faint)]">
-            No features in this scope.
-          </div>
-        )}
-        <ul className="divide-y divide-[var(--color-line)]">
-          {filtered.map((it) => (
-            <ItemRow
-              key={it.osm_id}
-              item={it}
-              isHovered={hoveredOsmId === it.osm_id}
-              isSelected={selectedOsmId === it.osm_id}
-              onHover={onHoverItem}
-              onClick={() => onSelectItem(it.osm_id)}
-            />
-          ))}
-        </ul>
-        {hasMore && (
-          <div className="border-t border-[var(--color-line)] p-2">
-            <button
-              type="button"
-              onClick={loadMore}
-              disabled={loading}
-              className="w-full rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] py-1.5 text-[11px] text-[var(--color-ink-soft)] hover:text-[var(--color-ink)] disabled:opacity-60"
-            >
-              {loading ? "Loading…" : "Load more"}
-            </button>
-          </div>
-        )}
-      </div>
+      {/* Non-list message states stay in normal flow so the windowed
+          renderer below owns the scrollable region exclusively. */}
+      {error && (
+        <div className="shrink-0 p-3 text-sm text-[var(--color-danger)]">{error}</div>
+      )}
+      {!error && loading && items.length === 0 && (
+        <div className="shrink-0 p-3 text-sm italic text-[var(--color-ink-faint)]">Loading…</div>
+      )}
+      {!error && !loading && filtered.length === 0 && items.length > 0 && (
+        <div className="shrink-0 p-3 text-sm italic text-[var(--color-ink-faint)]">
+          No features match “{search}”.
+        </div>
+      )}
+      {!error && !loading && items.length === 0 && (
+        <div className="shrink-0 p-3 text-sm italic text-[var(--color-ink-faint)]">
+          No features in this scope.
+        </div>
+      )}
+      {filtered.length > 0 && (
+        <VirtualizedItemList
+          items={filtered}
+          hoveredOsmId={hoveredOsmId}
+          selectedOsmId={selectedOsmId}
+          onHover={onHoverItem}
+          onSelect={onSelectItem}
+        />
+      )}
+      {hasMore && (
+        <div className="shrink-0 border-t border-[var(--color-line)] p-2">
+          <button
+            type="button"
+            onClick={loadMore}
+            disabled={loading}
+            className="w-full rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] py-1.5 text-[11px] text-[var(--color-ink-soft)] hover:text-[var(--color-ink)] disabled:opacity-60"
+          >
+            {loading ? "Loading…" : "Load more"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// VirtualizedItemList — windowed renderer for the drill-in list.
+//
+// Each ItemRow is fixed-height (52px including the divider). We render only
+// the slice currently inside the viewport plus a 10-row buffer above and
+// below to mask scroll-jank, then pad above/below with spacer divs so the
+// scrollbar reports the correct total. This keeps the DOM tiny (~30 rows
+// max) even when `items.length` is in the tens of thousands.
+//
+// Two design choices worth noting:
+//   * We own the scroll container ourselves instead of measuring an ancestor
+//     — that way the drill-in's height is constrained by `flex-1` from the
+//     parent, and we don't have to coordinate `overflow` rules across two
+//     levels of layout.
+//   * We listen to a ResizeObserver instead of a window resize handler so
+//     dock-resize / rail-resize updates the visible window without a page
+//     reflow event.
+// ────────────────────────────────────────────────────────────────────────────
+
+const ROW_HEIGHT_PX = 52;
+const ROW_BUFFER = 10;
+
+function VirtualizedItemList({
+  items,
+  hoveredOsmId,
+  selectedOsmId,
+  onHover,
+  onSelect,
+}: {
+  items: BrowseItemSummary[];
+  hoveredOsmId: string | null;
+  selectedOsmId: string | null;
+  onHover: (osmId: string | null) => void;
+  onSelect: (osmId: string) => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+
+  // Measure the viewport height. We start at 0; the ResizeObserver fires
+  // synchronously after layout, so the first paint will render an empty
+  // window but the second paint will fill — barely a perceptible flash.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setViewportHeight(el.clientHeight);
+    const ro = new ResizeObserver(() => {
+      setViewportHeight(el.clientHeight);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const total = items.length;
+  const totalHeight = total * ROW_HEIGHT_PX;
+
+  // Compute the visible window. With a 0-height viewport we render nothing.
+  const rawStart = Math.floor(scrollTop / ROW_HEIGHT_PX);
+  const rawEnd = Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT_PX);
+  const visibleStart = Math.max(0, rawStart - ROW_BUFFER);
+  const visibleEnd = Math.min(total, rawEnd + ROW_BUFFER);
+  const slice = items.slice(visibleStart, visibleEnd);
+  const topSpacer = visibleStart * ROW_HEIGHT_PX;
+  const bottomSpacer = Math.max(0, totalHeight - visibleEnd * ROW_HEIGHT_PX);
+
+  return (
+    <div
+      ref={scrollRef}
+      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+      className="min-h-0 flex-1 overflow-y-auto"
+      role="list"
+      aria-label="Feature inventory"
+    >
+      <div style={{ height: topSpacer }} aria-hidden="true" />
+      <ul className="divide-y divide-[var(--color-line)]">
+        {slice.map((it) => (
+          <ItemRow
+            key={it.osm_id}
+            item={it}
+            isHovered={hoveredOsmId === it.osm_id}
+            isSelected={selectedOsmId === it.osm_id}
+            onHover={onHover}
+            onClick={() => onSelect(it.osm_id)}
+          />
+        ))}
+      </ul>
+      <div style={{ height: bottomSpacer }} aria-hidden="true" />
     </div>
   );
 }
@@ -558,14 +646,18 @@ function ItemRow({
   const glyph = GEOMETRY_GLYPHS[item.geometry_kind] ?? GEOMETRY_GLYPHS.Unknown;
 
   return (
-    <li>
+    // Fixed height so VirtualizedItemList's spacer math matches reality.
+    // The previous layout grew the row when dominantTag was present — that
+    // worked when we rendered every row, but a windowed renderer needs
+    // predictable row height to compute scroll offsets.
+    <li style={{ height: ROW_HEIGHT_PX }}>
       <button
         type="button"
         onClick={onClick}
         onMouseEnter={() => onHover(item.osm_id)}
         onMouseLeave={() => onHover(null)}
         className={[
-          "block w-full px-3 py-2 text-left transition-colors",
+          "flex h-full w-full flex-col justify-center px-3 py-1.5 text-left transition-colors",
           isSelected
             ? "bg-[var(--color-accent-soft)]"
             : isHovered
@@ -592,11 +684,15 @@ function ItemRow({
             {item.name ?? "〈unnamed〉"}
           </span>
         </div>
-        {dominantTag && (
-          <div className="mt-0.5 truncate pl-5 font-[var(--font-mono)] text-[10px] text-[var(--color-ink-soft)]">
-            {dominantTag.key}={dominantTag.value}
-          </div>
-        )}
+        {/* Always render the second line — even empty — so heights agree.
+            We zero out the text when there's no dominant tag rather than
+            omitting the div, which would change the row height. */}
+        <div
+          className="mt-0.5 h-[12px] truncate pl-5 font-[var(--font-mono)] text-[10px] text-[var(--color-ink-soft)]"
+          aria-hidden={dominantTag ? undefined : true}
+        >
+          {dominantTag ? `${dominantTag.key}=${dominantTag.value}` : " "}
+        </div>
       </button>
     </li>
   );
