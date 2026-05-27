@@ -3,8 +3,9 @@ import maplibregl from "maplibre-gl";
 import type { Map as MapLibreMap, StyleSpecification } from "maplibre-gl";
 import { useProjectStore } from "@/stores/project";
 import { buildCollections } from "@/lib/geojson";
-import { defaultFeatureStyle } from "@/lib/defaults";
+import { defaultFeatureStyle, DEFAULT_ICON_HREF } from "@/lib/defaults";
 import { rgbaToCss } from "@/lib/kmlColor";
+import { buildTintedIcon, iconCacheKey } from "@/lib/iconBitmap";
 import type { FeatureStyle } from "@/lib/types";
 import { MapLegend } from "./MapLegend";
 
@@ -96,6 +97,18 @@ const LAYER_IDS = {
 
 const ALL_LAYER_IDS: readonly string[] = Object.values(LAYER_IDS);
 
+/** Default symbol-layer icon image — registered eagerly during map init so
+ * the symbol layer always has a valid `icon-image` fallback. Each category
+ * gets its own per-style image id; categories without a saved style fall back
+ * to this default. */
+const DEFAULT_ICON_IMAGE_ID = "cat-icon-default";
+
+/** Stable per-category image id. Used both as the MapLibre image key and as
+ * the value emitted by the `icon-image` match expression below. */
+function imageIdForCategory(value: string): string {
+  return `cat-icon-${value}`;
+}
+
 export function MapPreview() {
   const ref = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -171,7 +184,7 @@ export function MapPreview() {
       setError(msg);
     });
 
-    map.on("load", () => {
+    map.on("load", async () => {
       map.resize();
       try {
         for (const id of Object.values(SOURCE_IDS)) {
@@ -179,6 +192,24 @@ export function MapPreview() {
             type: "geojson",
             data: { type: "FeatureCollection", features: [] },
           });
+        }
+        // Pre-register the default icon (the atrocity-palette neutral pin
+        // tinted white). The symbol layer references this id as its fallback,
+        // so the moment the layer is added points have something to render —
+        // no "missing image" warnings while per-category bitmaps load.
+        try {
+          const prepared = await buildTintedIcon(
+            DEFAULT_ICON_HREF,
+            defaultFeatureStyle().icon.color,
+          );
+          if (!map.hasImage(DEFAULT_ICON_IMAGE_ID)) {
+            map.addImage(DEFAULT_ICON_IMAGE_ID, prepared.image, {
+              pixelRatio: prepared.pixelRatio,
+            });
+          }
+        } catch {
+          /* default icon failed to load — symbol layer will simply render
+             nothing for unstyled categories until per-category icons land */
         }
         map.addLayer({
           id: LAYER_IDS.polyFill, type: "fill", source: SOURCE_IDS.polygons,
@@ -192,11 +223,21 @@ export function MapPreview() {
           id: LAYER_IDS.line, type: "line", source: SOURCE_IDS.lines,
           paint: { "line-color": "#222", "line-width": 2 },
         });
+        // Points render as the user-chosen category icon (Earth Pro parity).
+        // The image id resolves via a per-category `match` expression that's
+        // refreshed by the icon-loading effect below. Until that effect has
+        // registered the per-category bitmaps, every feature falls back to
+        // the default icon (registered just before this layer is added).
         map.addLayer({
-          id: LAYER_IDS.point, type: "circle", source: SOURCE_IDS.points,
-          paint: {
-            "circle-radius": 6, "circle-color": "#fff",
-            "circle-stroke-color": "#222", "circle-stroke-width": 2,
+          id: LAYER_IDS.point, type: "symbol", source: SOURCE_IDS.points,
+          layout: {
+            "icon-image": DEFAULT_ICON_IMAGE_ID,
+            "icon-size": 1,
+            // Investigators must see every placemark — the map is the source
+            // of truth for what will end up in the export.
+            "icon-allow-overlap": true,
+            "icon-ignore-placement": true,
+            "icon-anchor": "center",
           },
         });
 
@@ -295,7 +336,8 @@ export function MapPreview() {
     }
   }, [collections, layersReady]);
 
-  // Category-style paint updates.
+  // Category-style paint updates (polygons + line; point styling happens
+  // via the symbol layer's `icon-image` / `icon-size` in the next effect).
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !layersReady) return;
@@ -304,15 +346,89 @@ export function MapPreview() {
     const fillOpacityExpr = buildMatchExpression(categoryStyles, (s) => (s.polygon.fill ? 1 : 0), 0.4);
     const outlineColorExpr = buildMatchExpression(categoryStyles, (s) => rgbaToCss(s.polygon.outline_color), rgbaToCss(defaultFeatureStyle().polygon.outline_color));
     const outlineWidthExpr = buildMatchExpression(categoryStyles, (s) => (s.polygon.outline ? s.polygon.outline_width : 0), 1.5);
-    const pointFillExpr = buildMatchExpression(categoryStyles, (s) => rgbaToCss(s.icon.color), "#fff");
-    const pointStrokeExpr = buildMatchExpression(categoryStyles, (s) => rgbaToCss(s.polygon.outline_color), "#222");
 
     safeSetPaint(map, LAYER_IDS.polyFill, "fill-color", fillColorExpr);
     safeSetPaint(map, LAYER_IDS.polyFill, "fill-opacity", fillOpacityExpr);
     safeSetPaint(map, LAYER_IDS.polyOutline, "line-color", outlineColorExpr);
     safeSetPaint(map, LAYER_IDS.polyOutline, "line-width", outlineWidthExpr);
-    safeSetPaint(map, LAYER_IDS.point, "circle-color", pointFillExpr);
-    safeSetPaint(map, LAYER_IDS.point, "circle-stroke-color", pointStrokeExpr);
+  }, [categoryStyles, layersReady]);
+
+  // Icon-image registration: for every category style, build a pre-tinted
+  // bitmap (matches Earth Pro's IconStyle/color multiply semantics) and
+  // register it under a per-category image id. As each bitmap lands we
+  // refresh the symbol layer's `icon-image` match expression so the map
+  // upgrades progressively from the default icon to the styled ones.
+  //
+  // `iconCacheKeysRef` tracks the (href, color) cache key per category so a
+  // category that flips colour or icon mid-session correctly reloads.
+  const iconCacheKeysRef = useRef<Map<string, string>>(new Map());
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !layersReady) return;
+
+    let cancelled = false;
+
+    const refreshIconImageExpression = () => {
+      if (cancelled || !mapRef.current) return;
+      const entries = Object.keys(categoryStyles);
+      if (entries.length === 0) {
+        safeSetLayout(map, LAYER_IDS.point, "icon-image", DEFAULT_ICON_IMAGE_ID);
+        return;
+      }
+      const expr: unknown[] = ["match", ["get", "categoryValue"]];
+      for (const value of entries) {
+        // Only point at the per-category image id once the bitmap has
+        // actually been registered; otherwise route to the default so we
+        // don't trigger a "missing image" log spam.
+        const id = imageIdForCategory(value);
+        expr.push(value, map.hasImage(id) ? id : DEFAULT_ICON_IMAGE_ID);
+      }
+      expr.push(DEFAULT_ICON_IMAGE_ID);
+      safeSetLayout(map, LAYER_IDS.point, "icon-image", expr);
+    };
+
+    // Build icon-size expression from each style's scale (data-driven). This
+    // stays in sync with the icon-image expression — both keyed by the same
+    // categoryValue.
+    const sizeExpr = buildMatchExpression(
+      categoryStyles,
+      (s) => s.icon.scale,
+      1,
+    );
+    safeSetLayout(map, LAYER_IDS.point, "icon-size", sizeExpr);
+
+    // Kick off async loads for every category whose cache key changed.
+    for (const [value, style] of Object.entries(categoryStyles)) {
+      const key = iconCacheKey(style.icon.icon_href, style.icon.color);
+      if (iconCacheKeysRef.current.get(value) === key) continue;
+      iconCacheKeysRef.current.set(value, key);
+      (async () => {
+        try {
+          const prepared = await buildTintedIcon(style.icon.icon_href, style.icon.color);
+          if (cancelled || !mapRef.current) return;
+          const id = imageIdForCategory(value);
+          // `updateImage` if it already exists; otherwise add. MapLibre
+          // throws on duplicate `addImage` calls.
+          if (mapRef.current.hasImage(id)) {
+            mapRef.current.removeImage(id);
+          }
+          mapRef.current.addImage(id, prepared.image, {
+            pixelRatio: prepared.pixelRatio,
+          });
+          refreshIconImageExpression();
+        } catch {
+          /* icon failed to load — leave the default fallback in place */
+        }
+      })();
+    }
+
+    // Run the expression refresh once synchronously so already-cached image
+    // ids (carried over from a prior render) take effect immediately.
+    refreshIconImageExpression();
+
+    return () => {
+      cancelled = true;
+    };
   }, [categoryStyles, layersReady]);
 
   // Selection-driven highlight.
@@ -329,21 +445,27 @@ export function MapPreview() {
       (s) => (s.polygon.outline ? s.polygon.outline_width : 0),
       1.5,
     );
-    const baseCircleRadius: unknown = 6;
+    // Base icon-size mirrors the category-style effect above so the
+    // highlight expression can multiply rather than replace.
+    const baseIconSize = buildMatchExpression(
+      categoryStyles,
+      (s) => s.icon.scale,
+      1,
+    );
 
     if (selection.kind === "category") {
-      // Bump outline width and circle radius for matching features.
+      // Bump outline width and icon size for matching features.
       safeSetPaint(map, LAYER_IDS.polyOutline, "line-width", [
         "case",
         ["==", ["get", "categoryValue"], selection.categoryValue],
         ["+", baseOutlineWidth, 2.5],
         baseOutlineWidth,
       ]);
-      safeSetPaint(map, LAYER_IDS.point, "circle-radius", [
+      safeSetLayout(map, LAYER_IDS.point, "icon-size", [
         "case",
         ["==", ["get", "categoryValue"], selection.categoryValue],
-        9,
-        baseCircleRadius,
+        ["*", baseIconSize, 1.4],
+        baseIconSize,
       ]);
     } else if (selection.kind === "source") {
       safeSetPaint(map, LAYER_IDS.polyOutline, "line-width", [
@@ -352,23 +474,23 @@ export function MapPreview() {
         ["+", baseOutlineWidth, 2.5],
         baseOutlineWidth,
       ]);
-      safeSetPaint(map, LAYER_IDS.point, "circle-radius", [
+      safeSetLayout(map, LAYER_IDS.point, "icon-size", [
         "case",
         ["==", ["get", "sourceFileId"], selection.sourceFileId],
-        9,
-        baseCircleRadius,
+        ["*", baseIconSize, 1.4],
+        baseIconSize,
       ]);
     } else if (selection.kind === "placemark") {
       // Pan to the placemark and emphasise it.
-      safeSetPaint(map, LAYER_IDS.point, "circle-radius", [
+      safeSetLayout(map, LAYER_IDS.point, "icon-size", [
         "case",
         [
           "all",
           ["==", ["get", "sourceFileId"], selection.sourceFileId],
           ["==", ["get", "index"], selection.placemarkIndex],
         ],
-        11,
-        baseCircleRadius,
+        ["*", baseIconSize, 1.7],
+        baseIconSize,
       ]);
       safeSetPaint(map, LAYER_IDS.polyOutline, "line-width", [
         "case",
@@ -384,7 +506,7 @@ export function MapPreview() {
     } else {
       // Reset to base.
       safeSetPaint(map, LAYER_IDS.polyOutline, "line-width", baseOutlineWidth);
-      safeSetPaint(map, LAYER_IDS.point, "circle-radius", baseCircleRadius);
+      safeSetLayout(map, LAYER_IDS.point, "icon-size", baseIconSize);
     }
   }, [selection, categoryStyles, layersReady]);
 
@@ -555,6 +677,22 @@ function safeSetPaint(
     map.setPaintProperty(layerId, property, value);
   } catch {
     /* swallow — paint update racing layer teardown isn't worth surfacing */
+  }
+}
+
+/** Same guard as `safeSetPaint` but for layout properties (e.g. `icon-image`,
+ * `icon-size` on symbol layers). */
+function safeSetLayout(
+  map: MapLibreMap,
+  layerId: string,
+  property: string,
+  value: unknown,
+): void {
+  if (!map.getLayer(layerId)) return;
+  try {
+    map.setLayoutProperty(layerId, property, value);
+  } catch {
+    /* swallow — layout update racing layer teardown isn't worth surfacing */
   }
 }
 
