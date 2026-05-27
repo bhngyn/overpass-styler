@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/Button";
-import { FieldShell, Select, TextArea, TextInput } from "@/components/ui/Field";
+import { FieldShell, TextArea, TextInput } from "@/components/ui/Field";
 import { api } from "@/lib/api";
 import { useProjectStore } from "@/stores/project";
 
@@ -10,19 +10,44 @@ interface Props {
 }
 
 /** The annotation fields are the same across investigations — keeping this list
- * stable means investigators learn the form once and trust it everywhere. */
+ * stable means investigators learn the form once and trust it everywhere.
+ *
+ * Confidence (Phase B5) uses a 1–4 dot picker — see {@link ConfidenceDots}. */
 const ANNOTATION_FIELDS = [
   { key: "note", label: "Note", type: "textarea" as const },
   { key: "source_url", label: "Source URL", type: "url" as const },
   { key: "date_observed", label: "Date observed", type: "date" as const },
-  {
-    key: "confidence",
-    label: "Confidence",
-    type: "select" as const,
-    options: ["", "low", "medium", "high"],
-  },
+  { key: "confidence", label: "Confidence", type: "confidence" as const },
   { key: "field_notes", label: "Field notes", type: "textarea" as const },
 ];
+
+/** Canonical encoding for the confidence field. Balloon HTML renders the
+ * stored string verbatim (`●●●○`), so storage and presentation are the same
+ * — what the investigator sees in the inspector is what Earth Pro shows. */
+const FILLED = "●"; // ●
+const EMPTY = "○"; // ○
+
+/** Render `level` filled dots followed by (4 − level) empty dots. */
+function encodeConfidence(level: number): string {
+  const lv = Math.max(0, Math.min(4, level));
+  return FILLED.repeat(lv) + EMPTY.repeat(4 - lv);
+}
+
+/** Read a stored confidence string back into a 0–4 level. Tolerant of legacy
+ * "low"/"medium"/"high" values so existing rows don't break. */
+function decodeConfidence(raw: string | undefined): number {
+  if (!raw) return 0;
+  // New encoding: count filled dots.
+  if (raw.includes(FILLED) || raw.includes(EMPTY)) {
+    return [...raw].filter((c) => c === FILLED).length;
+  }
+  // Legacy encodings — map the previous select options onto the dot scale.
+  const lc = raw.toLowerCase().trim();
+  if (lc === "low") return 1;
+  if (lc === "medium") return 2;
+  if (lc === "high") return 3;
+  return 0;
+}
 
 export function PlacemarkInspector({ sourceFileId, placemarkIndex }: Props) {
   const proj = useProjectStore((s) => s.currentProject);
@@ -174,19 +199,13 @@ export function PlacemarkInspector({ sourceFileId, placemarkIndex }: Props) {
                   }
                 />
               )}
-              {f.type === "select" && (
-                <Select
+              {f.type === "confidence" && (
+                <ConfidenceDots
                   value={fields[f.key] ?? ""}
-                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
-                    setFields((cur) => ({ ...cur, [f.key]: e.currentTarget.value }))
+                  onChange={(next) =>
+                    setFields((cur) => ({ ...cur, [f.key]: next }))
                   }
-                >
-                  {(f.options ?? []).map((opt) => (
-                    <option key={opt} value={opt}>
-                      {opt || "—"}
-                    </option>
-                  ))}
-                </Select>
+                />
               )}
               {(f.type === "url" || f.type === "date") && (
                 <TextInput
@@ -254,5 +273,57 @@ function FragmentRow({ k, v }: { k: string; v: string }) {
       </dt>
       <dd className="break-all text-[11px] text-[var(--color-ink)]">{v}</dd>
     </>
+  );
+}
+
+/**
+ * ConfidenceDots — 1–4 dot picker.
+ *
+ * Renders four buttons; clicking dot N sets the value to N filled dots
+ * followed by (4 − N) empty dots. Clicking the currently-active dot
+ * un-sets the value (level 0 → empty string), so the field can be cleared
+ * without a separate clear button.
+ *
+ * The stored encoding (`●●●○`) is also what Earth Pro renders in the
+ * exported balloon — what the investigator sees is what gets published.
+ */
+function ConfidenceDots({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const level = decodeConfidence(value);
+  const labels = ["Unknown", "Single source", "Two sources", "Corroborated", "Verified"];
+  return (
+    <div className="flex items-center gap-2">
+      <div className="flex items-center gap-0.5" role="radiogroup" aria-label="Confidence level">
+        {[1, 2, 3, 4].map((n) => {
+          const filled = n <= level;
+          return (
+            <button
+              key={n}
+              type="button"
+              role="radio"
+              aria-checked={level === n}
+              aria-label={`${n} of 4 — ${labels[n]}`}
+              onClick={() => onChange(level === n ? "" : encodeConfidence(n))}
+              className={[
+                "inline-flex h-6 w-6 items-center justify-center rounded text-sm leading-none transition-colors",
+                filled
+                  ? "text-[color:var(--accent-ink)] hover:text-[var(--color-ink)]"
+                  : "text-[var(--color-ink-faint)] hover:text-[var(--color-ink-soft)]",
+              ].join(" ")}
+            >
+              <span aria-hidden>{filled ? FILLED : EMPTY}</span>
+            </button>
+          );
+        })}
+      </div>
+      <span className="text-[11px] text-[var(--color-ink-faint)]">
+        {level === 0 ? "—" : labels[level]}
+      </span>
+    </div>
   );
 }
