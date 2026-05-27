@@ -2,7 +2,13 @@
 @import "maplibre-gl/dist/maplibre-gl.css";
 
 /* Design tokens — kept small and disciplined so the UI feels considered, not
-   stitched together. */
+   stitched together.
+
+   The "field notebook" tokens added in Phase B5 (--accent-ink, --paper,
+   --paper-warm, --ink-dark, --ink-faint-2) sit alongside the existing
+   neutral-and-burnt-orange palette. The notebook tokens lean cooler/more
+   restrained — they're used by the workflow chrome (stepper, eyebrows,
+   balloon HTML), while the existing tokens still drive the data panels. */
 @theme {
   --color-surface: #f7f6f3;            /* page background — warm off-white */
   --color-surface-raised: #ffffff;     /* panels, cards */
@@ -20,6 +26,54 @@
   --font-display: "Source Serif 4", "Charter", "Georgia", ui-serif, serif;
   --font-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
+
+  /* Field-notebook tokens — used by stepper, balloon HTML, eyebrows. */
+  --accent-ink: #2a5d6b;               /* muted teal-blue */
+  --paper: #fafaf6;                    /* paper-cream surface */
+  --paper-warm: #fbf6e8;               /* callout/note backgrounds */
+  --ink-dark: #1a1a1a;                 /* body text on paper */
+  --ink-faint: #6a6a6a;                /* secondary text on paper */
+}
+
+/* Dark-theme mapping. The app currently runs only in light, but we map the
+   notebook tokens here so future work doesn't have to chase them down. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent-ink: #79b8c4;
+    --paper: #1a1a1a;
+    --paper-warm: #24211a;
+    --ink-dark: #ececec;
+    --ink-faint: #8a8a8a;
+  }
+}
+
+/* Small-caps eyebrow utility — section headers, status labels, breadcrumbs.
+   Tailwind 4 lets us reference design tokens directly; this keeps the cadence
+   in one place. */
+.eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--color-ink-faint);
+}
+
+/* Wobble compass — used in the workspace title bar.
+   Lives outside @theme because keyframes can't live in there. Subtle (~2deg)
+   so it reads as "alive" without becoming a billboard. */
+@keyframes wobble-compass {
+  0%   { transform: rotate(-2deg); }
+  50%  { transform: rotate( 2deg); }
+  100% { transform: rotate(-2deg); }
+}
+.compass-wobble {
+  display: inline-block;
+  animation: wobble-compass 3.6s ease-in-out infinite;
+  transform-origin: 50% 50%;
+}
+/* Respect users who'd rather not see motion. */
+@media (prefers-reduced-motion: reduce) {
+  .compass-wobble { animation: none; }
 }
 
 html, body, #root {
