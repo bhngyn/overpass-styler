@@ -159,7 +159,7 @@ class PresetSummary(BaseModel):
 
 
 class CreatePresetRequest(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1, max_length=200)
     style: FeatureStyleSchema
 
 
