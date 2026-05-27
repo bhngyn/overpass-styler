@@ -100,8 +100,8 @@ def test_render_balloon_empty_annotation_keys_still_valid():
     validator = _parse(html)
     assert validator.errors == []
     assert validator.stack == []
-    # No EVIDENCE section header when there are no annotation fields.
-    assert "Evidence" not in html
+    # No Notes section header when there are no annotation fields.
+    assert "Notes" not in html
     # But the OSM tags section is always emitted.
     assert "OSM tags" in html
 

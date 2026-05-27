@@ -233,7 +233,7 @@ function buildBalloonHtml({
   <div class="hr-eyebrow">${eyebrowIcon}${escapeHtml(categoryLabel || "Feature")}</div>
   <h1 class="hr-title">${escapeHtml(name)}</h1>
   <hr class="hr-rule" />
-  <div class="hr-section">Evidence</div>
+  <div class="hr-section">Notes</div>
   <table class="hr-kv">
 ${evidenceRows}
   </table>

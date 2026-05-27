@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from lxml import etree
 
 from .atrocity_icons import data_uri_for as _atrocity_data_uri
-from .balloon import render_balloon
+from .balloon import DEFAULT_OSM_TAG_KEYS, render_balloon
 from .color import rgba_to_kml
 from .hr_icons import data_uri_for as _hr_data_uri
 from .parse import KML_NS, ParsedKml, Placemark
@@ -185,11 +185,51 @@ def _build_geometry(placemark: Placemark) -> etree._Element | None:
 def _build_extended_data(
     placemark: Placemark, annotations: dict[str, str]
 ) -> etree._Element | None:
-    keys_in_order = list(placemark.extended_data_order)
-    # Always emit annotations after OSM tags, in the order they were given.
-    annotation_items = [(f"{ANNOTATION_PREFIX}{k}", v) for k, v in annotations.items() if v != ""]
+    """Build the ``<ExtendedData>`` block for a placemark.
 
-    if not keys_in_order and not annotation_items:
+    Two reasons we emit more than just the raw OSM tags:
+
+    1. **Annotations** — investigator-added ``hr:*`` fields go in too, after the
+       original OSM tags, so they round-trip and are reachable from the
+       balloon template.
+    2. **Substitution stubs** — Earth Pro renders ``$[KEY]`` literally when no
+       matching ``<Data name="KEY">`` element exists on the placemark. The
+       balloon template references a fixed set of OSM keys and the full
+       annotation set, so we emit empty ``<Data>`` entries for any of those
+       that the placemark doesn't already carry. With the stubs in place,
+       missing tags render as empty strings instead of broken-looking
+       ``$[amenity]`` literals.
+    """
+    keys_in_order = list(placemark.extended_data_order)
+    emitted: set[str] = set(keys_in_order)
+
+    # Annotations (with values) emit after the original OSM tags, in caller-
+    # supplied order. Empty annotations are dropped here; if the field is
+    # listed in DEFAULT_ANNOTATION_KEYS we'll re-emit it below as an empty
+    # stub so the balloon template's `$[hr:foo]` token still substitutes.
+    annotation_items = [
+        (f"{ANNOTATION_PREFIX}{k}", v) for k, v in annotations.items() if v != ""
+    ]
+
+    # Compute the set of stubs we need to add. These are balloon-referenced
+    # keys (OSM + every annotation field) that aren't already present.
+    required_keys: list[str] = list(DEFAULT_OSM_TAG_KEYS) + [
+        f"{ANNOTATION_PREFIX}{k}" for k in DEFAULT_ANNOTATION_KEYS
+    ]
+    # The `@id` token is referenced in the footer link. Overpass exports
+    # always include `@id`, but defensive stubbing means the link gracefully
+    # degrades to OpenStreetMap's home page if the tag is somehow missing.
+    required_keys.append("@id")
+    annotation_names_already_emitted = {name for name, _ in annotation_items}
+
+    stub_keys: list[str] = []
+    for key in required_keys:
+        if key in emitted or key in annotation_names_already_emitted:
+            continue
+        stub_keys.append(key)
+        emitted.add(key)
+
+    if not keys_in_order and not annotation_items and not stub_keys:
         return None
 
     el = etree.Element(_qname("ExtendedData"))
@@ -199,6 +239,9 @@ def _build_extended_data(
     for name, value in annotation_items:
         data = etree.SubElement(el, _qname("Data"), attrib={"name": name})
         _sub(data, "value", value)
+    for key in stub_keys:
+        data = etree.SubElement(el, _qname("Data"), attrib={"name": key})
+        _sub(data, "value", "")
     return el
 
 

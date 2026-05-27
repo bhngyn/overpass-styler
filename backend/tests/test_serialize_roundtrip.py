@@ -132,6 +132,62 @@ def test_annotations_emitted_with_namespace(prisons_path: Path):
     assert amenity is not None and amenity.text == "prison"
 
 
+def test_balloon_token_keys_get_empty_stub_when_missing(cemeteries_path: Path):
+    """Earth Pro renders ``$[KEY]`` literally when the placemark has no
+    matching ``<Data name="KEY">`` element. Cemeteries don't carry an
+    ``amenity`` tag, so the balloon's ``$[amenity]`` token used to leak
+    through as literal text in the popup. Verify the serializer now emits
+    an empty stub so substitution resolves to an empty string."""
+    _, root = _round_trip(cemeteries_path)
+    placemarks = root.findall(".//k:Placemark", NSMAP)
+    assert placemarks, "fixture should have placemarks"
+
+    for pm in placemarks:
+        # Every OSM key the balloon template references must be present so
+        # `$[KEY]` substitutes — even when the underlying tag is absent.
+        for key in (
+            "amenity", "landuse", "building", "operator", "name:en",
+            "addr:city", "addr:country", "start_date", "wikipedia",
+        ):
+            data = pm.find(
+                f"k:ExtendedData/k:Data[@name='{key}']", NSMAP
+            )
+            assert data is not None, f"missing stub for OSM key {key!r}"
+
+        # And every hr:* annotation key the balloon template references
+        # must also be present, even if the user hasn't annotated anything.
+        for key in ("note", "source_url", "date_observed", "confidence", "field_notes"):
+            data = pm.find(
+                f"k:ExtendedData/k:Data[@name='{ANNOTATION_PREFIX}{key}']", NSMAP
+            )
+            assert data is not None, f"missing stub for annotation key {key!r}"
+
+
+def test_existing_tag_values_are_not_overwritten_by_stubs(cemeteries_path: Path):
+    """The stub-emission pass must not clobber a real OSM tag value with an
+    empty string. Cemeteries do carry ``landuse=cemetery`` — ensure that
+    survives untouched after the serializer adds stubs for the missing
+    keys."""
+    _, root = _round_trip(cemeteries_path)
+    placemarks = root.findall(".//k:Placemark", NSMAP)
+    for pm in placemarks:
+        landuse = pm.find("k:ExtendedData/k:Data[@name='landuse']/k:value", NSMAP)
+        assert landuse is not None and landuse.text == "cemetery"
+
+
+def test_real_annotation_values_take_priority_over_stubs(prisons_path: Path):
+    """If the user has filled in an annotation, the real value must be
+    emitted — the stub-pass must not also emit an empty duplicate."""
+    _, root = _round_trip(prisons_path, with_annotations=True)
+    annotated = root.findall(".//k:Placemark", NSMAP)[0]
+    note_entries = annotated.findall(
+        f"k:ExtendedData/k:Data[@name='{ANNOTATION_PREFIX}note']", NSMAP
+    )
+    assert len(note_entries) == 1, "stub pass duplicated a real annotation"
+    note_value = note_entries[0].find("k:value", NSMAP)
+    assert note_value is not None and note_value.text == "field-verified"
+
+
 def test_folder_wraps_source_layer(prisons_path: Path):
     _, root = _round_trip(prisons_path)
     folder = root.find(".//k:Folder", NSMAP)

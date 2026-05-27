@@ -22,9 +22,12 @@ from __future__ import annotations
 from html import escape
 
 # The OSM tag keys most frequently relevant to investigator workflows. The
-# balloon emits a row for each one; Earth Pro replaces missing ones with
-# empty strings, so spurious rows just appear blank rather than breaking.
-_DEFAULT_OSM_TAG_KEYS: tuple[str, ...] = (
+# balloon emits a row for each one. Earth Pro only substitutes `$[KEY]` when
+# the placemark has a matching `<Data name="KEY">` entry — otherwise the
+# token renders literally. The serializer leans on ``DEFAULT_OSM_TAG_KEYS``
+# to inject empty stubs so every token resolves, even when the underlying
+# placemark is missing that tag.
+DEFAULT_OSM_TAG_KEYS: tuple[str, ...] = (
     "amenity",
     "landuse",
     "building",
@@ -35,6 +38,9 @@ _DEFAULT_OSM_TAG_KEYS: tuple[str, ...] = (
     "start_date",
     "wikipedia",
 )
+# Backward-compat alias — keep the private name a reachable export so any
+# existing import keeps working. Newer code should use the public name.
+_DEFAULT_OSM_TAG_KEYS = DEFAULT_OSM_TAG_KEYS
 
 # Inline stylesheet. Earth Pro tolerates a `<style>` block at the top of the
 # balloon body — keep selectors simple (tag + class), no descendant combinators
@@ -206,9 +212,9 @@ def render_balloon(
     parts.append('<h1 class="hr-title">$[name]</h1>')
     parts.append('<hr class="hr-rule"/>')
 
-    # EVIDENCE section — investigator annotations under hr:* namespace.
+    # NOTES section — investigator annotations under hr:* namespace.
     if annotation_keys:
-        parts.append('<div class="hr-section">Evidence</div>')
+        parts.append('<div class="hr-section">Notes</div>')
         parts.append('<table class="hr-kv">')
         for idx, key in enumerate(annotation_keys):
             parts.append(
