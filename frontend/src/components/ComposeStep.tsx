@@ -12,6 +12,7 @@ import { useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { QueryEditor, type QueryDraft } from "@/components/QueryEditor";
 import { useProjectStore } from "@/stores/project";
+import { api } from "@/lib/api";
 
 // Module-level session flag — once the investigator confirms the first
 // Overpass call, we don't ask again until the page reloads.
@@ -291,6 +292,15 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
                 overpassConfirmedThisSession = true;
                 setOverpassConfirmed(true);
               }}
+              onPreflight={
+                currentProject
+                  ? (query, bbox) =>
+                      api.runOverpassQueryPreflight(currentProject.id, {
+                        query,
+                        bbox,
+                      })
+                  : undefined
+              }
             />
           </div>
         ) : (
