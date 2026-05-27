@@ -21,8 +21,10 @@ export function ContextPanel() {
           one feature's style.
         </p>
         <p>
-          When you're ready, hit <span className="font-medium">Export styled KML</span>{" "}
-          in the top bar.
+          When you're ready, advance to{" "}
+          <span className="font-medium">Review</span> and then{" "}
+          <span className="font-medium">Export</span> in the stepper above
+          to generate the styled KML.
         </p>
       </div>
     );

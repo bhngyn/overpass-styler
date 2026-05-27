@@ -205,7 +205,11 @@ export function ProjectWorkspace() {
                     setEditingName(false);
                   }
                 }}
-                className="rounded border border-[var(--color-line)] bg-[var(--color-surface)] px-2 py-1 text-sm"
+                // min-w-[20rem] keeps long project names from clipping in
+                // the rename input. We size to the content via the value
+                // length too, so a short name doesn't waste space.
+                size={Math.max(draftName.length + 1, 24)}
+                className="min-w-[20rem] rounded border border-[var(--color-line)] bg-[var(--color-surface)] px-2 py-1 text-sm"
               />
             ) : (
               // Rendered as a <button> styled like a heading so keyboard users
@@ -353,12 +357,17 @@ function WorkspaceBody({
   onOpenTagLibrary: () => void;
 }) {
   if (step === "compose") {
+    // ComposeStep paints its own 280px layer-stack rail + 1fr query editor.
+    // The map gets the same 400px-ish footprint as the right rail in the
+    // other steps — wider than the previous 380px hardcode so it can show
+    // meaningful context, and consistent with Review / Export so the map
+    // never visually "jumps" between steps.
     return (
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="flex min-h-0 min-w-0 flex-1">
           <ComposeStep onOpenTagLibrary={onOpenTagLibrary} />
         </div>
-        <aside className="relative min-h-0 w-[380px] shrink-0 border-l border-[var(--color-line)] bg-[#eae6dc]">
+        <aside className="relative min-h-0 w-[420px] shrink-0 border-l border-[var(--color-line)] bg-[#eae6dc]">
           <MapPreview />
         </aside>
       </div>

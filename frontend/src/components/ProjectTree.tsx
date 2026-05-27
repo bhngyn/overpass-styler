@@ -30,10 +30,11 @@ export function ProjectTree() {
   if (proj.source_files.length === 0) {
     return (
       <div className="space-y-3 p-4 text-xs text-[var(--color-ink-faint)]">
-        <p>No KMLs imported yet.</p>
+        <p>No layers yet.</p>
         <p>
-          Use <span className="font-medium">Import KML…</span> in the top bar to drop an
-          Overpass Turbo export into this project.
+          Head back to <span className="font-medium">Compose</span> in the
+          stepper to author an Overpass query, or drop in an existing KML
+          file from a previous Overpass Turbo export.
         </p>
       </div>
     );
