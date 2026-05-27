@@ -475,13 +475,19 @@ export function MapPreview() {
         style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
       />
       {/* Basemap switcher — bottom-right above the maplibre attribution. */}
-      <div className="absolute bottom-7 right-3 flex overflow-hidden rounded-md border border-[var(--color-line)] bg-white/95 text-xs shadow-sm">
+      <div
+        role="group"
+        aria-label="Basemap"
+        className="absolute bottom-7 right-3 flex overflow-hidden rounded-md border border-[var(--color-line)] bg-white/95 text-xs shadow-sm"
+      >
         {(Object.entries(BASEMAPS) as [Basemap, typeof BASEMAPS[Basemap]][]).map(
           ([key, cfg]) => (
             <button
               key={key}
               type="button"
               onClick={() => setBasemap(key)}
+              aria-pressed={basemap === key}
+              aria-label={`Basemap: ${cfg.label}`}
               className={[
                 "border-l border-[var(--color-line)] px-2 py-1 first:border-l-0",
                 basemap === key

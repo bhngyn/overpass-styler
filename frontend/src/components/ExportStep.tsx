@@ -122,14 +122,12 @@ function SourceOutline({
 export function ExportRightRail() {
   const proj = useProjectStore((s) => s.currentProject);
   const sourceFiles = useProjectStore((s) => s.sourceFiles);
-  const setWorkflowStep = useProjectStore(
-    (s) => (s as unknown as { setWorkflowStep?: (step: string) => void }).setWorkflowStep,
-  );
+  const setWorkflowStep = useProjectStore((s) => s.setWorkflowStep);
 
   const defaultFilename = useMemo(() => {
     if (!proj) return "export.kml";
     return `${slugify(proj.name)}-${todayISO()}.kml`;
-  }, [proj?.name]);
+  }, [proj]);
 
   const [filename, setFilename] = useState(defaultFilename);
   // Keep the auto-default in sync if the project is renamed while the user is
@@ -193,18 +191,16 @@ export function ExportRightRail() {
             >
               Export again
             </Button>
-            {setWorkflowStep ? (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setExportedAt(null);
-                  setWorkflowStep("compose");
-                }}
-              >
-                Start another export cycle
-              </Button>
-            ) : null}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setExportedAt(null);
+                setWorkflowStep("compose");
+              }}
+            >
+              Start another export cycle
+            </Button>
           </div>
         </div>
       </div>

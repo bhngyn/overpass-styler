@@ -397,8 +397,11 @@ export const useProjectStore = create<Store>((set, get) => ({
   },
 
   // ── Phase B4 (browse mode) ──
+  // Mode and step transitions both clear the stale error banner — a Compose
+  // bake failure shouldn't haunt the user through Style / Review / Export
+  // or after they navigate to Browse.
   setMode(mode) {
-    set({ mode });
+    set({ mode, error: null });
   },
 
   async bakeFromBrowse(body) {
@@ -429,7 +432,7 @@ export const useProjectStore = create<Store>((set, get) => ({
 
   // ── Phase B1 (workflow stepper) ──
   setWorkflowStep(step) {
-    set({ workflowStep: step });
+    set({ workflowStep: step, error: null });
   },
 
   async runOverpassQuery(body) {

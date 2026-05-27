@@ -166,12 +166,19 @@ export function ProjectWorkspace() {
                 className="rounded border border-[var(--color-line)] bg-[var(--color-surface)] px-2 py-1 text-sm"
               />
             ) : (
-              <h1
-                onClick={() => setEditingName(true)}
-                className="cursor-text font-[var(--font-display)] text-base text-[var(--color-ink)]"
-                title="Click to rename"
-              >
-                {proj.name}
+              // Rendered as a <button> styled like a heading so keyboard users
+              // can rename via Tab + Enter / Space; <h1 onClick> wasn't
+              // reachable. The visual treatment is unchanged.
+              <h1 className="font-[var(--font-display)] text-base text-[var(--color-ink)]">
+                <button
+                  type="button"
+                  onClick={() => setEditingName(true)}
+                  aria-label={`Rename project — current name ${proj.name}`}
+                  title="Rename project"
+                  className="cursor-text rounded text-left text-[var(--color-ink)] hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--color-accent)]"
+                >
+                  {proj.name}
+                </button>
               </h1>
             )}
             {distinctCategoryKeys.length > 0 && (
