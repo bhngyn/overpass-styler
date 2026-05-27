@@ -73,7 +73,6 @@ PREFLIGHT_REFUSE_AREA_KM2 = 50_000.0
 PREFLIGHT_TINY_AREA_KM2 = 1.0
 PREFLIGHT_TARGET_TILE_COUNT = 3000
 PREFLIGHT_MAX_TILE_DIM = 12  # 12x12 = 144 tiles ≈ 2.5min at 1 req/sec
-TILED_INVENTORY_TIMEOUT_S = 90
 # Per-tile area cap for the inventory-tiled path. Larger than
 # DEFAULT_AREA_CAP_KM2 because the caller has already split a large bbox
 # into ≤3000-feature chunks via preflight; we trust those chunks to be
