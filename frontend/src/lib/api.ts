@@ -7,6 +7,13 @@ import type {
   SourceFileDetail,
   SourceFileSummary,
 } from "./types";
+import type {
+  CuratedResponse,
+  MergedTagResponse,
+  SearchResponse,
+  TaginfoKeysResponse,
+  TaginfoValuesResponse,
+} from "./tagLibrary.types";
 
 const BASE = "/api";
 
@@ -112,4 +119,22 @@ export const api = {
   exportUrl: (projectId: number) => `${BASE}/projects/${projectId}/export`,
 
   icons: () => request<IconCatalogue>("/icons"),
+
+  // ── Phase B3 (tag library) ──────────────────────────────────────────────
+  // Drawer-facing endpoints. ``curated`` is local-only; the other four hit
+  // Taginfo behind a 7-day on-disk cache (see backend/app/enrichment/taginfo.py).
+  tagLibrary: {
+    curated: () => request<CuratedResponse>("/tag-library/curated"),
+    keys: () => request<TaginfoKeysResponse>("/tag-library/keys"),
+    values: (key: string) =>
+      request<TaginfoValuesResponse>(
+        `/tag-library/values?key=${encodeURIComponent(key)}`,
+      ),
+    tag: (key: string, value: string) =>
+      request<MergedTagResponse>(
+        `/tag-library/tag?key=${encodeURIComponent(key)}&value=${encodeURIComponent(value)}`,
+      ),
+    search: (q: string) =>
+      request<SearchResponse>(`/tag-library/search?q=${encodeURIComponent(q)}`),
+  },
 };

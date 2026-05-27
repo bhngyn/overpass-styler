@@ -6,6 +6,7 @@ import { buildCollections } from "@/lib/geojson";
 import { defaultFeatureStyle } from "@/lib/defaults";
 import { rgbaToCss } from "@/lib/kmlColor";
 import type { FeatureStyle } from "@/lib/types";
+import { MapLegend } from "./MapLegend";
 
 /** Basemap options.
  * - "streets" (default): Carto Voyager — sharper labels + better road hierarchy
@@ -506,8 +507,13 @@ export function MapPreview() {
         </button>
       )}
 
-      {/* Legend — top-right, collapsible. */}
-      <Legend collapsed={legendCollapsed} onToggle={() => setLegendCollapsed((c) => !c)} />
+      {/* Legend — top-right, collapsible. The component lives in MapLegend.tsx
+          so the Review step can mount it in its own rail too (B2). */}
+      <MapLegend
+        placement="map"
+        collapsed={legendCollapsed}
+        onToggle={() => setLegendCollapsed((c) => !c)}
+      />
 
       {error && (
         <div
@@ -649,107 +655,3 @@ function buildPopupHtml(props: Record<string, unknown>): string {
   `;
 }
 
-/** Legend — top-right floating panel that lists every category visible in
- * the project, with its swatch and feature count. Click a swatch to toggle
- * visibility (mirrors the eye toggles in the tree). */
-function Legend({
-  collapsed,
-  onToggle,
-}: {
-  collapsed: boolean;
-  onToggle: () => void;
-}) {
-  const proj = useProjectStore((s) => s.currentProject);
-  const sourceFiles = useProjectStore((s) => s.sourceFiles);
-  const hiddenCategories = useProjectStore((s) => s.hiddenCategories);
-  const hiddenSourceFiles = useProjectStore((s) => s.hiddenSourceFiles);
-  const toggleCategoryVisible = useProjectStore((s) => s.toggleCategoryVisible);
-  const styleForCategory = useProjectStore((s) => s.styleForCategory);
-
-  if (!proj) return null;
-
-  // Group categories by source file so the legend reads as a hierarchy.
-  const groups = proj.source_files
-    .map((sf) => {
-      const detail = sourceFiles[sf.id];
-      if (!detail) return null;
-      const entries = Object.entries(detail.category_counts).sort(([a], [b]) => a.localeCompare(b));
-      if (entries.length === 0) return null;
-      return {
-        sf,
-        entries,
-        hidden: hiddenSourceFiles.has(sf.id),
-      };
-    })
-    .filter((g): g is NonNullable<typeof g> => g !== null);
-
-  if (groups.length === 0) return null;
-
-  return (
-    <div className="absolute right-3 top-3 max-w-xs rounded-md border border-[var(--color-line)] bg-white/95 text-xs shadow-sm">
-      <button
-        type="button"
-        onClick={onToggle}
-        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-[10px] uppercase tracking-wider text-[var(--color-ink-faint)] hover:text-[var(--color-ink)]"
-      >
-        <span>Legend</span>
-        <span aria-hidden="true">{collapsed ? "▸" : "▾"}</span>
-      </button>
-      {!collapsed && (
-        <div className="max-h-[60vh] overflow-y-auto px-3 pb-3">
-          {groups.map(({ sf, entries, hidden }) => (
-            <div key={sf.id} className="mt-1 space-y-0.5">
-              <div
-                className={[
-                  "truncate text-[11px] font-medium",
-                  hidden ? "opacity-50" : "",
-                ].join(" ")}
-                title={sf.filename}
-              >
-                {sf.filename}
-              </div>
-              <div className="space-y-0.5">
-                {entries.map(([value, count]) => {
-                  const style = styleForCategory(value);
-                  const isHidden = hidden || hiddenCategories.has(value);
-                  return (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={() => toggleCategoryVisible(value)}
-                      title={isHidden ? `Show ${value}` : `Hide ${value}`}
-                      className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left hover:bg-[var(--color-surface-sunken)]"
-                    >
-                      <span
-                        className="block h-3 w-3 shrink-0 rounded-sm border"
-                        style={{
-                          backgroundColor: rgbaToCss(style.polygon.fill_color),
-                          borderColor: rgbaToCss(style.polygon.outline_color),
-                          opacity: isHidden ? 0.25 : 1,
-                        }}
-                      />
-                      <span
-                        className={[
-                          "truncate font-[var(--font-mono)] text-[11px]",
-                          isHidden ? "text-[var(--color-ink-faint)] line-through" : "text-[var(--color-ink)]",
-                        ].join(" ")}
-                      >
-                        {value}
-                      </span>
-                      <span className="ml-auto shrink-0 text-[10px] text-[var(--color-ink-faint)]">
-                        {count}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-          <div className="mt-2 border-t border-[var(--color-line)] pt-1.5 text-[10px] text-[var(--color-ink-faint)]">
-            Click a swatch to hide/show that layer on the map.
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
