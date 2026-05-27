@@ -25,6 +25,7 @@ import { useProjectStore } from "@/stores/project";
 import type {
   BrowseBbox,
   BrowseInventoryResponse,
+  BrowsePreflightResponse,
 } from "@/lib/types";
 import { BrowseMap, type BrowseMapHandle } from "./BrowseMap";
 import { InventoryRail } from "./InventoryRail";
@@ -54,6 +55,21 @@ export function BrowseMode() {
   const [hoveredFeatureId, setHoveredFeatureId] = useState<string | null>(null);
   const [bakeOpen, setBakeOpen] = useState<{ prefill: BakeHandoffPrefill } | null>(null);
 
+  // ── L2 preflight + tiled-inventory orchestration ──────────────────────────
+  //
+  // The legacy flow (one direct call to /inventory) is preserved for the
+  // "single" preflight strategy. For "tiled" we keep a tile grid in state so
+  // BrowseMap can draw an overlay while inventory-tiled is running. For
+  // "refuse" we surface a clear empty state with the backend's reason
+  // string. `_preflight` is held so future pieces of the UI (e.g. a
+  // strategy badge in the command strip) can read the active strategy.
+  const [, setPreflight] = useState<BrowsePreflightResponse | null>(null);
+  const [tileGrid, setTileGrid] = useState<
+    | { rows: number; cols: number; bbox: BrowseBbox; loadedTiles: number; totalTiles: number }
+    | null
+  >(null);
+  const [refusal, setRefusal] = useState<{ reason: string; totalCount: number } | null>(null);
+
   // Make sure the project list is fresh — BakeHandoffModal renders its
   // destination dropdown from it, and an investigator landing in Browse
   // for the first time might have never triggered refreshProjects.
@@ -63,17 +79,106 @@ export function BrowseMode() {
 
   // Fetch inventory whenever bbox changes. Clears selection so the rail
   // returns to the domain-cards view for the new area.
+  //
+  // The pipeline runs preflight first, then routes to one of three paths:
+  //   - "single" → legacy api.browse.inventory call.
+  //   - "tiled"  → render a tile-grid overlay, then api.browse.inventoryTiled.
+  //   - "refuse" → no fetch; surface the backend's reason string.
+  //
+  // The preflight call is itself a small Overpass round-trip — count-only —
+  // so we don't gate it behind a separate confirmation. Investigators have
+  // already opted into Overpass when they entered Browse mode at all.
   async function fetchInventory(forBbox: BrowseBbox) {
     setInventoryLoading(true);
     setInventoryError(null);
     setSelectedFeatureId(null);
+    setInventory(null);
+    setTileGrid(null);
+    setRefusal(null);
+
+    let pre: BrowsePreflightResponse;
+    try {
+      pre = await api.browse.preflight(forBbox);
+    } catch (e) {
+      // Preflight failed — most likely an unsupported / offline backend.
+      // Fall back to the legacy direct call so the UI still works against
+      // pre-L2 deployments.
+      try {
+        const result = await api.browse.inventory(forBbox);
+        setInventory(result);
+        setInventoryFetchedAt(Date.now());
+      } catch (e2) {
+        setInventoryError(String(e2 ?? e));
+      } finally {
+        setInventoryLoading(false);
+      }
+      return;
+    }
+    setPreflight(pre);
+
+    if (pre.strategy === "refuse") {
+      setRefusal({
+        reason: pre.reason ?? "This area is too large to inventory.",
+        totalCount: pre.total_count,
+      });
+      setInventoryLoading(false);
+      return;
+    }
+
+    if (pre.strategy === "tiled" && pre.tile_grid && pre.tiles) {
+      const totalTiles = pre.tiles.length;
+      setTileGrid({
+        rows: pre.tile_grid.rows,
+        cols: pre.tile_grid.cols,
+        bbox: forBbox,
+        loadedTiles: 0,
+        totalTiles,
+      });
+      try {
+        // No SSE on the wire yet — we await the aggregated response. The
+        // tile-grid overlay shows the operator that work is happening; we
+        // optimistically tick the progress bar over the expected wall-time
+        // budget so the UI doesn't feel frozen.
+        //
+        // Wall-time estimate: Overpass rate-limits us to ~1 req/sec, so a
+        // 36-tile fetch takes ~40s on the slow path. We tick once per
+        // second up to (totalTiles - 1) to keep the indicator from
+        // claiming we're done before the response lands.
+        const tickHandle = setInterval(() => {
+          setTileGrid((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  loadedTiles: Math.min(prev.loadedTiles + 1, prev.totalTiles - 1),
+                }
+              : prev,
+          );
+        }, 1000);
+        try {
+          const result = await api.browse.inventoryTiled(pre.tiles);
+          setInventory(result);
+          setInventoryFetchedAt(Date.now());
+          setTileGrid((prev) =>
+            prev ? { ...prev, loadedTiles: prev.totalTiles } : prev,
+          );
+        } finally {
+          clearInterval(tickHandle);
+        }
+      } catch (e) {
+        setInventoryError(String(e));
+      } finally {
+        setInventoryLoading(false);
+      }
+      return;
+    }
+
+    // strategy === "single" (default path)
     try {
       const result = await api.browse.inventory(forBbox);
       setInventory(result);
       setInventoryFetchedAt(Date.now());
     } catch (e) {
       setInventoryError(String(e));
-      setInventory(null);
     } finally {
       setInventoryLoading(false);
     }
@@ -178,6 +283,7 @@ export function BrowseMode() {
             hoveredOsmId={hoveredFeatureId}
             selectedOsmId={selectedFeatureId}
             onFeatureClick={(osmId) => setSelectedFeatureId(osmId)}
+            tileGrid={tileGrid}
           />
 
           {/* Command strip — overlaid on the map. */}
@@ -195,6 +301,16 @@ export function BrowseMode() {
         <aside className="min-h-0 min-w-0 overflow-x-hidden border-l border-[var(--color-line)] bg-[var(--color-surface-raised)]">
           {!bbox ? (
             <EmptyState />
+          ) : refusal ? (
+            <RefusalView
+              reason={refusal.reason}
+              totalCount={refusal.totalCount}
+              onReset={() => {
+                setBbox(null);
+                setRefusal(null);
+                setPreflight(null);
+              }}
+            />
           ) : selectedFeatureId ? (
             <FeatureDetail
               osmId={selectedFeatureId}
@@ -389,6 +505,49 @@ function EmptyState() {
           inventory rail will populate with every domain OSM knows about.
         </p>
       </div>
+    </div>
+  );
+}
+
+/** Rendered when the preflight call returns strategy="refuse" — the bbox
+ * is too large or too dense to inventory at all. We surface the backend's
+ * reason verbatim (it's the most accurate explanation of which threshold
+ * tripped) and offer a one-click reset back to the bbox-pick state. */
+function RefusalView({
+  reason,
+  totalCount,
+  onReset,
+}: {
+  reason: string;
+  totalCount: number;
+  onReset: () => void;
+}) {
+  return (
+    <div className="flex h-full flex-col p-6">
+      <div className="text-[10px] uppercase tracking-[0.22em] text-[var(--color-danger)]">
+        Area refused
+      </div>
+      <h2 className="mt-1 font-[var(--font-display)] text-lg text-[var(--color-ink)]">
+        Too much to inventory.
+      </h2>
+      {totalCount > 0 && (
+        <p className="mt-2 font-[var(--font-mono)] text-xs text-[var(--color-ink-soft)]">
+          ~{totalCount.toLocaleString()} features estimated
+        </p>
+      )}
+      <p className="mt-3 text-xs leading-relaxed text-[var(--color-ink-soft)]">
+        {reason}
+      </p>
+      <div className="mt-5">
+        <Button variant="primary" onClick={onReset}>
+          Try a smaller area
+        </Button>
+      </div>
+      <p className="mt-3 text-[10px] italic text-[var(--color-ink-faint)]">
+        Browse is meant for reconnaissance — if you already know what
+        you're looking for, the project workflow's Compose step is a
+        better fit at this scale.
+      </p>
     </div>
   );
 }
