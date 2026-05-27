@@ -21,6 +21,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { TextInput } from "@/components/ui/Field";
 import { api } from "@/lib/api";
+import { readConsent, writeConsent } from "@/lib/networkConsent";
 import { useProjectStore } from "@/stores/project";
 import type {
   BrowseBbox,
@@ -77,6 +78,19 @@ export function BrowseMode() {
     refreshProjects();
   }, [refreshProjects]);
 
+  // Outbound-traffic consent gate for Browse mode. Per the privacy contract,
+  // the first Overpass call requires explicit confirmation. We hold the
+  // pending bbox in state so the consent modal can resume the fetch on
+  // approval. D3 review caught that Browse never had this gate — the
+  // comment that previously claimed "entering Browse implies consent" was
+  // wrong: investigators can click the Browse card without ever sending
+  // a request, and they deserve the same explicit prompt as Compose and
+  // Tag Library.
+  const [pendingFetch, setPendingFetch] = useState<BrowseBbox | null>(null);
+  const [overpassConsent, setOverpassConsent] = useState<
+    "granted" | "denied" | null
+  >(() => readConsent("browse-overpass"));
+
   // Fetch inventory whenever bbox changes. Clears selection so the rail
   // returns to the domain-cards view for the new area.
   //
@@ -84,10 +98,6 @@ export function BrowseMode() {
   //   - "single" → legacy api.browse.inventory call.
   //   - "tiled"  → render a tile-grid overlay, then api.browse.inventoryTiled.
   //   - "refuse" → no fetch; surface the backend's reason string.
-  //
-  // The preflight call is itself a small Overpass round-trip — count-only —
-  // so we don't gate it behind a separate confirmation. Investigators have
-  // already opted into Overpass when they entered Browse mode at all.
   async function fetchInventory(forBbox: BrowseBbox) {
     setInventoryLoading(true);
     setInventoryError(null);
@@ -185,16 +195,27 @@ export function BrowseMode() {
   }
 
   useEffect(() => {
-    if (bbox) {
-      void fetchInventory(bbox);
-    } else {
+    if (!bbox) {
       setInventory(null);
       setInventoryFetchedAt(null);
+      return;
     }
-    // We use a string key for stable comparison — array reference would
-    // refetch every render since setBbox creates a fresh tuple each time.
+    if (overpassConsent === "granted") {
+      void fetchInventory(bbox);
+    } else if (overpassConsent === "denied") {
+      // Investigator declined this session — leave the inventory empty and
+      // surface a soft message via the same inventoryError channel.
+      setInventoryError(
+        "Browse needs to query overpass-api.de — declined this session. Reload to re-prompt.",
+      );
+    } else {
+      // No decision yet — stash the bbox and let the modal render below.
+      setPendingFetch(bbox);
+    }
+    // String key for stable comparison — array reference would refetch
+    // every render since setBbox creates a fresh tuple each time.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bbox?.join(",")]);
+  }, [bbox?.join(","), overpassConsent]);
 
   // Items rendered on the map. We don't pre-fetch every drill-in scope;
   // instead we feed BrowseMap the dots from inventory.summary.bbox when we
@@ -342,6 +363,91 @@ export function BrowseMode() {
           onClose={() => setBakeOpen(null)}
         />
       )}
+
+      {/* First-Overpass-call-per-session consent gate. Investigators picking
+          a bbox is the trigger; we hold the bbox in pendingFetch and only
+          release the fetch on explicit OK. */}
+      {pendingFetch && overpassConsent === null && (
+        <OverpassConsentModal
+          onAccept={() => {
+            writeConsent("browse-overpass", "granted");
+            setOverpassConsent("granted");
+            const next = pendingFetch;
+            setPendingFetch(null);
+            void fetchInventory(next);
+          }}
+          onDecline={() => {
+            writeConsent("browse-overpass", "denied");
+            setOverpassConsent("denied");
+            setPendingFetch(null);
+            setBbox(null);
+            setInventoryError(
+              "Browse needs to query overpass-api.de — declined this session. Reload to re-prompt.",
+            );
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Lightweight per-session consent prompt. Modeled on the Compose-step
+ * confirmation and the Tag-Library drawer's drawer-level prompt. Esc and
+ * click-outside both decline; the primary button accepts. */
+function OverpassConsentModal({
+  onAccept,
+  onDecline,
+}: {
+  onAccept: () => void;
+  onDecline: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onDecline();
+      if (e.key === "Enter") onAccept();
+    }
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onAccept, onDecline]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="browse-consent-title"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4"
+      onClick={onDecline}
+    >
+      <div
+        className="w-[26rem] max-w-full rounded-lg border border-[var(--color-line)] bg-[var(--paper)] p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <p
+          className="uppercase text-[var(--color-accent)]"
+          style={{ fontSize: "10px", letterSpacing: "0.22em", fontWeight: 600 }}
+        >
+          Outbound request
+        </p>
+        <h2
+          id="browse-consent-title"
+          className="mt-2 font-[var(--font-display)] text-lg text-[var(--ink-dark)]"
+        >
+          Browse reaches out to overpass-api.de
+        </h2>
+        <p className="mt-2 text-sm text-[var(--ink-faint)]">
+          Field Atlas queries OpenStreetMap's public Overpass API to discover
+          features in the area you've picked. The bbox you scoped is visible
+          to that server. Continue?
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="ghost" size="sm" onClick={onDecline}>
+            Cancel
+          </Button>
+          <Button variant="primary" size="sm" onClick={onAccept} autoFocus>
+            Continue
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
