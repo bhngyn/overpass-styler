@@ -182,6 +182,22 @@ def test_non_hr_icon_href_passes_through(prisons_path: Path):
     assert href_el is not None and href_el.text == custom
 
 
+def test_balloon_style_survives_cdata_round_trip(prisons_path: Path):
+    """The BalloonStyle/text holds KML substitution tokens inside CDATA.
+    If anything in the serialize pipeline strips or escapes them, Earth Pro
+    will render literal '$[name]' strings instead of substituting them."""
+    _, root = _round_trip(prisons_path)
+    balloon_text = root.find(".//k:Style/k:BalloonStyle/k:text", NSMAP)
+    assert balloon_text is not None
+    assert balloon_text.text is not None
+    # Substitution syntax must survive verbatim — neither HTML-escaped
+    # ($&#91;name&#93;) nor stripped.
+    assert "$[name]" in balloon_text.text
+    # And the inline stylesheet must be intact so the balloon renders as the
+    # evidence-document layout, not Earth Pro's raw ExtendedData table.
+    assert "<style" in balloon_text.text
+
+
 def test_emit_then_reparse_via_our_parser(prisons_path: Path):
     """The most important contract: our own serializer's output must be parsable by
     our own parser without loss, so the import-export cycle is closed."""
