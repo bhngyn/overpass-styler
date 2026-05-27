@@ -30,10 +30,15 @@ from dataclasses import dataclass, field
 
 from lxml import etree
 
+from .balloon import render_balloon
 from .color import rgba_to_kml
 from .hr_icons import data_uri_for
 from .parse import KML_NS, ParsedKml, Placemark
 from .style import FeatureStyle
+
+# Default investigator annotation fields surfaced in the Evidence section of
+# every balloon. Keep in sync with the frontend PlacemarkInspector.
+DEFAULT_ANNOTATION_KEYS: tuple[str, ...] = ("source_url", "date", "confidence", "note")
 
 # User-annotation namespace prefix on ExtendedData Data names. Keeps OSM tags and
 # investigator-added fields visually separated in Earth Pro popups.
@@ -78,7 +83,23 @@ def _resolve_export_href(href: str) -> str:
     return data if data is not None else href
 
 
-def _build_style(style: FeatureStyle) -> etree._Element:
+def _category_label_from_style_id(style_id: str) -> str:
+    """Best-effort human-readable label derived from a style id.
+
+    Style ids look like ``cat-amenity-prison`` or ``cat-landuse-cemetery``.
+    Strip the ``cat-`` prefix and titlecase what's left; callers can override
+    with a friendlier label via `_build_style(..., category_label=...)`.
+    """
+    stem = style_id.removeprefix("cat-") if style_id.startswith("cat-") else style_id
+    return stem.replace("-", " ").replace("_", " ").strip().title() or "Feature"
+
+
+def _build_style(
+    style: FeatureStyle,
+    *,
+    category_label: str | None = None,
+    annotation_keys: list[str] | None = None,
+) -> etree._Element:
     el = etree.Element(_qname("Style"), attrib={"id": style.id})
 
     icon_style = _sub(el, "IconStyle")
@@ -87,7 +108,8 @@ def _build_style(style: FeatureStyle) -> etree._Element:
     if style.icon.heading:
         _sub(icon_style, "heading", f"{style.icon.heading:g}")
     icon = _sub(icon_style, "Icon")
-    _sub(icon, "href", _resolve_export_href(style.icon.icon_href))
+    resolved_icon_href = _resolve_export_href(style.icon.icon_href)
+    _sub(icon, "href", resolved_icon_href)
 
     label_style = _sub(el, "LabelStyle")
     _sub(label_style, "color", rgba_to_kml(style.label.color))
@@ -101,6 +123,18 @@ def _build_style(style: FeatureStyle) -> etree._Element:
     _sub(poly_style, "color", rgba_to_kml(style.polygon.fill_color))
     _sub(poly_style, "fill", "1" if style.polygon.fill else "0")
     _sub(poly_style, "outline", "1" if style.polygon.outline else "0")
+
+    # BalloonStyle — gives Earth Pro a styled HTML popup instead of its default
+    # ExtendedData table. The template uses KML substitution tokens so a single
+    # block serves every placemark in this category.
+    balloon_style = _sub(el, "BalloonStyle")
+    balloon_html = render_balloon(
+        category_label or _category_label_from_style_id(style.id),
+        resolved_icon_href,
+        list(annotation_keys) if annotation_keys is not None else list(DEFAULT_ANNOTATION_KEYS),
+    )
+    balloon_text = _sub(balloon_style, "text")
+    balloon_text.text = etree.CDATA(balloon_html)
 
     return el
 
@@ -191,5 +225,13 @@ def serialize(doc: StyledDocument) -> bytes:
     )
 
     # Self-check: re-parse what we just emitted so we never hand back broken XML.
-    etree.fromstring(body)
+    reparsed = etree.fromstring(body)
+    # Every <Style> we emitted must have a BalloonStyle/text with non-empty
+    # content. CDATA round-trip bugs would silently lose the HTML template.
+    for style_el in reparsed.findall(f".//{{{KML_NS}}}Style"):
+        balloon_text = style_el.find(f"{{{KML_NS}}}BalloonStyle/{{{KML_NS}}}text")
+        if balloon_text is None or not (balloon_text.text or "").strip():
+            raise RuntimeError(
+                f"BalloonStyle/text missing or empty on Style id={style_el.get('id')!r}"
+            )
     return body
