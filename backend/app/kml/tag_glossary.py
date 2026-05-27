@@ -128,7 +128,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
             "building=warehouse",
         ),
         default_overpass_clause='nwr["amenity"="prison"]({{bbox}});',
-        default_icon_id="hr-evt-detention",
+        default_icon_id="detention-facility",
     ),
     GlossaryEntry(
         id="building-prison",
@@ -144,7 +144,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("amenity=prison",),
         default_overpass_clause='wr["building"="prison"]({{bbox}});',
-        default_icon_id="hr-evt-detention",
+        default_icon_id="detention-facility",
     ),
     GlossaryEntry(
         id="building-detention",
@@ -160,7 +160,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("amenity=prison", "amenity=police"),
         default_overpass_clause='wr["building"="detention"]({{bbox}});',
-        default_icon_id="hr-evt-detention",
+        default_icon_id="detention-facility",
     ),
     GlossaryEntry(
         id="amenity-police",
@@ -176,7 +176,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("amenity=prison", "building=detention"),
         default_overpass_clause='nwr["amenity"="police"]({{bbox}});',
-        default_icon_id="hr-evt-detention",
+        default_icon_id="detention-facility",
     ),
     GlossaryEntry(
         id="building-warehouse",
@@ -213,7 +213,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("landuse=cemetery", "amenity=place_of_worship"),
         default_overpass_clause='nwr["amenity"="grave_yard"]({{bbox}});',
-        default_icon_id="hr-evt-casualty",
+        default_icon_id="body-recovery",
     ),
     GlossaryEntry(
         id="landuse-cemetery",
@@ -229,7 +229,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("amenity=grave_yard", "cemetery=mass_grave"),
         default_overpass_clause='wr["landuse"="cemetery"]({{bbox}});',
-        default_icon_id="hr-evt-casualty",
+        default_icon_id="body-recovery",
     ),
     GlossaryEntry(
         id="cemetery-mass-grave",
@@ -246,7 +246,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("landuse=cemetery", "historic=memorial"),
         default_overpass_clause='wr["cemetery"="mass_grave"]({{bbox}});',
-        default_icon_id="hr-evt-mass-grave",
+        default_icon_id="mass-grave",
     ),
     GlossaryEntry(
         id="historic-memorial-mass-grave",
@@ -263,7 +263,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("historic=memorial", "cemetery=mass_grave"),
         default_overpass_clause='nwr["memorial"="mass_grave"]({{bbox}});',
-        default_icon_id="hr-evt-mass-grave",
+        default_icon_id="mass-grave",
     ),
     GlossaryEntry(
         id="historic-memorial",
@@ -279,7 +279,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("memorial=war_memorial", "memorial=mass_grave"),
         default_overpass_clause='nwr["historic"="memorial"]({{bbox}});',
-        default_icon_id="hr-evt-casualty",
+        default_icon_id="body-recovery",
     ),
     GlossaryEntry(
         id="memorial-war-memorial",
@@ -295,7 +295,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("historic=memorial", "memorial=mass_grave"),
         default_overpass_clause='nwr["memorial"="war_memorial"]({{bbox}});',
-        default_icon_id="hr-evt-casualty",
+        default_icon_id="body-recovery",
     ),
 
     # ------------------------------------------------------------------
@@ -315,7 +315,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("building:condition=damaged", "building=*"),
         default_overpass_clause='wr["damage"="destroyed"]({{bbox}});',
-        default_icon_id="hr-evt-shelling",
+        default_icon_id="shelled-site",
     ),
     GlossaryEntry(
         id="damage-damaged",
@@ -331,7 +331,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("damage=destroyed", "building:condition=damaged"),
         default_overpass_clause='wr["damage"="damaged"]({{bbox}});',
-        default_icon_id="hr-evt-shelling",
+        default_icon_id="shelled-site",
     ),
     GlossaryEntry(
         id="building-condition-damaged",
@@ -347,7 +347,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("damage=damaged", "building:condition=destroyed"),
         default_overpass_clause='wr["building:condition"="damaged"]({{bbox}});',
-        default_icon_id="hr-evt-shelling",
+        default_icon_id="shelled-site",
     ),
     GlossaryEntry(
         id="building-condition-destroyed",
@@ -362,7 +362,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("damage=destroyed",),
         default_overpass_clause='wr["building:condition"="destroyed"]({{bbox}});',
-        default_icon_id="hr-evt-shelling",
+        default_icon_id="shelled-site",
     ),
     GlossaryEntry(
         id="abandoned-building",
@@ -379,7 +379,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("damage=destroyed", "ruins=yes"),
         default_overpass_clause='wr["abandoned:building"]({{bbox}});',
-        default_icon_id="hr-evt-shelling",
+        default_icon_id="shelled-site",
     ),
     GlossaryEntry(
         id="ruins-yes",
@@ -395,7 +395,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("damage=destroyed", "historic=ruins"),
         default_overpass_clause='wr["ruins"="yes"]({{bbox}});',
-        default_icon_id="hr-evt-shelling",
+        default_icon_id="shelled-site",
     ),
 
     # ------------------------------------------------------------------
@@ -416,7 +416,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("military=base", "military=checkpoint", "barrier=military"),
         default_overpass_clause='wr["landuse"="military"]({{bbox}});',
-        default_icon_id="hr-force-military",
+        default_icon_id="military-base",
     ),
     GlossaryEntry(
         id="military-base",
@@ -432,7 +432,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("landuse=military", "military=barracks"),
         default_overpass_clause='nwr["military"="base"]({{bbox}});',
-        default_icon_id="hr-force-military",
+        default_icon_id="military-base",
     ),
     GlossaryEntry(
         id="military-barracks",
@@ -448,7 +448,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("landuse=military", "amenity=prison"),
         default_overpass_clause='nwr["military"="barracks"]({{bbox}});',
-        default_icon_id="hr-force-military",
+        default_icon_id="military-base",
     ),
     GlossaryEntry(
         id="military-checkpoint",
@@ -464,7 +464,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("barrier=checkpoint", "highway=checkpoint"),
         default_overpass_clause='nwr["military"="checkpoint"]({{bbox}});',
-        default_icon_id="hr-force-checkpoint",
+        default_icon_id="checkpoint",
     ),
     GlossaryEntry(
         id="barrier-checkpoint",
@@ -479,7 +479,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("military=checkpoint", "barrier=border_control"),
         default_overpass_clause='nwr["barrier"="checkpoint"]({{bbox}});',
-        default_icon_id="hr-force-checkpoint",
+        default_icon_id="checkpoint",
     ),
     GlossaryEntry(
         id="barrier-border-control",
@@ -494,7 +494,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("barrier=checkpoint", "amenity=customs"),
         default_overpass_clause='nwr["barrier"="border_control"]({{bbox}});',
-        default_icon_id="hr-force-border",
+        default_icon_id="border-crossing",
     ),
     GlossaryEntry(
         id="military-bunker",
@@ -509,7 +509,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("landuse=military", "historic=bunker"),
         default_overpass_clause='nwr["military"="bunker"]({{bbox}});',
-        default_icon_id="hr-force-military",
+        default_icon_id="military-base",
     ),
     GlossaryEntry(
         id="military-trench",
@@ -524,7 +524,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("military=bunker", "landuse=military"),
         default_overpass_clause='wr["military"="trench"]({{bbox}});',
-        default_icon_id="hr-force-military",
+        default_icon_id="military-base",
     ),
 
     # ------------------------------------------------------------------
@@ -545,7 +545,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("social_facility=refugee", "landuse=residential"),
         default_overpass_clause='nwr["amenity"="refugee_site"]({{bbox}});',
-        default_icon_id="hr-evt-displacement",
+        default_icon_id="idp-camp",
     ),
     GlossaryEntry(
         id="social-facility-refugee",
@@ -560,7 +560,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("amenity=refugee_site", "amenity=social_facility"),
         default_overpass_clause='nwr["social_facility"="refugee"]({{bbox}});',
-        default_icon_id="hr-evt-displacement",
+        default_icon_id="idp-camp",
     ),
     GlossaryEntry(
         id="amenity-shelter",
@@ -576,7 +576,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("shelter_type=emergency_shelter", "amenity=refugee_site"),
         default_overpass_clause='nwr["amenity"="shelter"]["shelter_type"="emergency_shelter"]({{bbox}});',
-        default_icon_id="hr-evt-displacement",
+        default_icon_id="idp-camp",
     ),
     GlossaryEntry(
         id="emergency-assembly-point",
@@ -591,7 +591,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("amenity=shelter", "emergency=*"),
         default_overpass_clause='nwr["emergency"="assembly_point"]({{bbox}});',
-        default_icon_id="hr-evt-displacement",
+        default_icon_id="idp-camp",
     ),
 
     # ------------------------------------------------------------------
@@ -612,7 +612,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("building=school", "amenity=kindergarten", "amenity=university"),
         default_overpass_clause='nwr["amenity"="school"]({{bbox}});',
-        default_icon_id="hr-prot-school",
+        default_icon_id="school",
     ),
     GlossaryEntry(
         id="amenity-kindergarten",
@@ -628,7 +628,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("amenity=school",),
         default_overpass_clause='nwr["amenity"="kindergarten"]({{bbox}});',
-        default_icon_id="hr-prot-school",
+        default_icon_id="school",
     ),
     GlossaryEntry(
         id="amenity-hospital",
@@ -644,7 +644,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("healthcare=hospital", "amenity=clinic", "amenity=doctors"),
         default_overpass_clause='nwr["amenity"="hospital"]({{bbox}});',
-        default_icon_id="hr-prot-medical",
+        default_icon_id="hospital",
     ),
     GlossaryEntry(
         id="healthcare-hospital",
@@ -659,7 +659,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("amenity=hospital", "healthcare=*"),
         default_overpass_clause='nwr["healthcare"="hospital"]({{bbox}});',
-        default_icon_id="hr-prot-medical",
+        default_icon_id="hospital",
     ),
     GlossaryEntry(
         id="amenity-clinic",
@@ -675,7 +675,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("healthcare=clinic", "amenity=hospital", "amenity=doctors"),
         default_overpass_clause='nwr["amenity"="clinic"]({{bbox}});',
-        default_icon_id="hr-prot-medical",
+        default_icon_id="hospital",
     ),
     GlossaryEntry(
         id="amenity-doctors",
@@ -690,7 +690,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("amenity=clinic", "healthcare=doctor"),
         default_overpass_clause='nwr["amenity"="doctors"]({{bbox}});',
-        default_icon_id="hr-prot-medical",
+        default_icon_id="hospital",
     ),
     GlossaryEntry(
         id="amenity-place-of-worship",
@@ -706,7 +706,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("religion=*", "building=mosque", "building=church"),
         default_overpass_clause='nwr["amenity"="place_of_worship"]({{bbox}});',
-        default_icon_id="hr-prot-religious",
+        default_icon_id="religious-site",
     ),
     GlossaryEntry(
         id="amenity-marketplace",
@@ -738,7 +738,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("man_made=water_tower", "amenity=drinking_water"),
         default_overpass_clause='nwr["man_made"="water_well"]({{bbox}});',
-        default_icon_id="hr-prot-water",
+        default_icon_id="water-source",
     ),
     GlossaryEntry(
         id="man-made-water-tower",
@@ -753,7 +753,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("man_made=water_well", "man_made=reservoir_covered"),
         default_overpass_clause='nwr["man_made"="water_tower"]({{bbox}});',
-        default_icon_id="hr-prot-water",
+        default_icon_id="water-source",
     ),
     GlossaryEntry(
         id="amenity-drinking-water",
@@ -769,7 +769,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("man_made=water_well", "amenity=refugee_site"),
         default_overpass_clause='nwr["amenity"="drinking_water"]({{bbox}});',
-        default_icon_id="hr-prot-water",
+        default_icon_id="water-source",
     ),
     GlossaryEntry(
         id="amenity-university",
@@ -785,7 +785,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("amenity=school", "amenity=college"),
         default_overpass_clause='nwr["amenity"="university"]({{bbox}});',
-        default_icon_id="hr-prot-school",
+        default_icon_id="school",
     ),
     GlossaryEntry(
         id="amenity-library",
@@ -801,7 +801,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("amenity=place_of_worship", "historic=monument"),
         default_overpass_clause='nwr["amenity"="library"]({{bbox}});',
-        default_icon_id="hr-prot-heritage",
+        default_icon_id="religious-site",
     ),
     GlossaryEntry(
         id="historic-monument",
@@ -817,7 +817,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("historic=memorial", "amenity=place_of_worship"),
         default_overpass_clause='nwr["historic"="monument"]({{bbox}});',
-        default_icon_id="hr-prot-heritage",
+        default_icon_id="religious-site",
     ),
     GlossaryEntry(
         id="historic-archaeological-site",
@@ -833,7 +833,7 @@ _GLOSSARY: tuple[GlossaryEntry, ...] = (
         ),
         related_tags=("historic=monument", "historic=ruins"),
         default_overpass_clause='nwr["historic"="archaeological_site"]({{bbox}});',
-        default_icon_id="hr-prot-heritage",
+        default_icon_id="religious-site",
     ),
     GlossaryEntry(
         id="aeroway-aerodrome",

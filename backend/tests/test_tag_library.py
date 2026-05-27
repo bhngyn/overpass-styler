@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.enrichment import taginfo
+from app.kml.atrocity_icons import ATROCITY_ICONS
 from app.kml.tag_glossary import all_entries, find
 
 # ---------------------------------------------------------------------------
@@ -37,6 +38,22 @@ def test_every_entry_has_substantial_field_note():
     for entry in all_entries():
         assert len(entry.field_note) >= 30, (
             f"{entry.id}: field_note too short ({len(entry.field_note)} chars)"
+        )
+
+
+def test_every_glossary_icon_id_resolves_in_atrocity_palette():
+    """Catches drift between glossary's `default_icon_id` and the atrocity palette.
+
+    Either field may be `None` (some entries are general-purpose and don't
+    suggest a specific icon), but if specified it must exist.
+    """
+    palette = {icon.id for icon in ATROCITY_ICONS}
+    for entry in all_entries():
+        if entry.default_icon_id is None:
+            continue
+        assert entry.default_icon_id in palette, (
+            f"glossary entry {entry.id!r} points at icon "
+            f"{entry.default_icon_id!r} which is not in ATROCITY_ICONS"
         )
 
 

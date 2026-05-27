@@ -30,9 +30,10 @@ from dataclasses import dataclass, field
 
 from lxml import etree
 
+from .atrocity_icons import data_uri_for as _atrocity_data_uri
 from .balloon import render_balloon
 from .color import rgba_to_kml
-from .hr_icons import data_uri_for
+from .hr_icons import data_uri_for as _hr_data_uri
 from .parse import KML_NS, ParsedKml, Placemark
 from .style import FeatureStyle
 
@@ -76,11 +77,19 @@ def _sub(parent: etree._Element, tag: str, text: str | None = None) -> etree._El
 
 
 def _resolve_export_href(href: str) -> str:
-    """Inline bundled HR icons as `data:image/png;base64,…` so exported KMLs
-    are self-contained and render in Earth Pro without our server reachable.
-    Non-HR hrefs (Google's hosted KML icons, custom HTTP URLs) pass through."""
-    data = data_uri_for(href)
-    return data if data is not None else href
+    """Inline bundled icons (atrocity palette + HR palette) as
+    ``data:image/png;base64,…`` so exported KMLs are self-contained and render
+    in Earth Pro without our server reachable. Non-bundled hrefs (Google's
+    hosted KML icons, custom HTTP URLs) pass through unchanged.
+
+    Each palette's ``data_uri_for`` returns ``None`` for hrefs that don't
+    belong to it, so trying them in turn is cheap and order-independent.
+    """
+    for resolver in (_atrocity_data_uri, _hr_data_uri):
+        data = resolver(href)
+        if data is not None:
+            return data
+    return href
 
 
 def _category_label_from_style_id(style_id: str) -> str:
