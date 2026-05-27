@@ -20,6 +20,11 @@ export interface QueryDraftRunResult {
 
 export interface QueryDraft {
   id: string;
+  /** Wall-clock ms at draft creation — used purely for stable sort order so
+   * the layer-stack rail renders drafts in the order the investigator added
+   * them. Sorting by the random ``id`` (D2 review #14) shuffled drafts on
+   * every render. */
+  createdAt: number;
   name: string;
   query: string;
   bbox: Bbox | null;

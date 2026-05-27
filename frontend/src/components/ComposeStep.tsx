@@ -26,6 +26,9 @@ interface Props {
 function newDraft(): QueryDraft {
   return {
     id: crypto.randomUUID(),
+    // Wall-clock at creation so the rail sorts by add-order. UUID-based sort
+    // (the previous behaviour) shuffled drafts unpredictably (D2 #14).
+    createdAt: Date.now(),
     name: "",
     query: "",
     bbox: null,
@@ -53,7 +56,7 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
   const fileInput = useRef<HTMLInputElement>(null);
 
   const draftList = useMemo(
-    () => Object.values(drafts).sort((a, b) => a.id.localeCompare(b.id)),
+    () => Object.values(drafts).sort((a, b) => a.createdAt - b.createdAt),
     [drafts],
   );
 
@@ -126,8 +129,12 @@ export function ComposeStep({ onOpenTagLibrary }: Props) {
         setSelection({ kind: "source", sourceFileId: sfid });
       }
       setWorkflowStep("style");
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      // The store already set the App-level error banner before re-throwing
+      // (see runOverpassQuery in stores/project.ts). Surfacing the same
+      // message inline here would double-report. The throw is sufficient
+      // to skip the subsequent navigation; we just clean up the spinner.
+      // D2 review #15.
     } finally {
       setAddingDraftId(null);
     }

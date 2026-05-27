@@ -64,6 +64,20 @@ export function BakeHandoffModal({ prefill, open, onClose }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, prefill]);
 
+  // Escape key closes the modal — keyboard parity with the click-outside
+  // affordance. D2 review #3.
+  useEffect(() => {
+    if (!open) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !submitting) {
+        e.stopPropagation();
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open, submitting, onClose]);
+
   if (!open) return null;
 
   async function submit() {
